@@ -20,8 +20,6 @@ import threading
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
 
 from src.graph import build_graph
@@ -34,9 +32,10 @@ from src.tools.feishu_integration import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── LangGraph app (singleton) ───────────────────────────────────────
+# ── LangGraph app (initialized at module level, BEFORE uvicorn's event loop) ──
 
-graph_app = None
+graph_app = build_graph()
+logger.info("LangGraph workflow compiled and ready.")
 
 # Per-thread preloaded reference materials (text + images)
 # Populated by /read_folder or /read_doc commands before workflow starts
@@ -214,12 +213,12 @@ def _handle_feishu_message(data: P2ImMessageReceiveV1) -> None:
 def _start_feishu_ws():
     """Initialize and start the Feishu WebSocket long-connection client.
 
-    Runs in a daemon thread so it does not block FastAPI startup.
-    Must create a new event loop to avoid conflict with FastAPI's main loop.
+    Runs in a daemon thread BEFORE uvicorn starts, so there is no
+    existing asyncio event loop to conflict with.
+    lark_oapi's cli.start() internally calls loop.run_until_complete(),
+    which requires that no other event loop is running in the process yet.
     """
-    # Create a fresh event loop for this thread to avoid
-    # "RuntimeError: This event loop is already running" from lark_oapi's
-    # internal loop.run_until_complete() clashing with FastAPI's uvicorn loop.
+    # Ensure this thread has its own clean event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -250,23 +249,13 @@ def _start_feishu_ws():
     cli.start()  # Blocking call — runs inside daemon thread
 
 
-# ── FastAPI lifespan ─────────────────────────────────────────────────
+# ── Start Feishu WS at module level (BEFORE uvicorn's event loop exists) ──
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global graph_app
-    graph_app = build_graph()
-    logger.info("LangGraph workflow compiled and ready.")
+_ws_thread = threading.Thread(target=_start_feishu_ws, daemon=True)
+_ws_thread.start()
+logger.info("Feishu WebSocket thread launched.")
 
-    # Start Feishu WebSocket client in a background daemon thread
-    ws_thread = threading.Thread(target=_start_feishu_ws, daemon=True)
-    ws_thread.start()
-    logger.info("Feishu WebSocket thread launched.")
-
-    yield
-
-
-app = FastAPI(title="Feishu LangGraph Agent", lifespan=lifespan)
+app = FastAPI(title="Feishu LangGraph Agent")
 
 
 # ── Health check (for cloud platform probes) ────────────────────────
