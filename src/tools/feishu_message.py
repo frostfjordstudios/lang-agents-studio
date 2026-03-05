@@ -52,10 +52,18 @@ def send_text(chat_id: str, text: str) -> Optional[str]:
     """
     client = _get_client()
 
+    # Feishu text messages: ensure non-empty, truncate if too long (max ~30000 chars)
+    if not text or not isinstance(text, str):
+        text = "(空消息)"
+    if len(text) > 30000:
+        text = text[:30000] + "\n\n... (内容过长，已截断)"
+
+    content_str = json.dumps({"text": text}, ensure_ascii=False)
+
     body = CreateMessageRequestBody.builder() \
         .receive_id(chat_id) \
         .msg_type("text") \
-        .content(json.dumps({"text": text})) \
+        .content(content_str) \
         .build()
 
     request = CreateMessageRequest.builder() \
@@ -67,8 +75,8 @@ def send_text(chat_id: str, text: str) -> Optional[str]:
 
     if not response.success():
         logger.error(
-            "发送文本失败: code=%s, msg=%s, chat_id=%s",
-            response.code, response.msg, chat_id,
+            "发送文本失败: code=%s, msg=%s, ext=%s, chat_id=%s",
+            response.code, response.msg, getattr(response, 'ext', ''), chat_id,
         )
         return None
 
@@ -89,9 +97,12 @@ def reply_text(message_id: str, text: str) -> Optional[str]:
     """
     client = _get_client()
 
+    if not text or not isinstance(text, str):
+        text = "(空消息)"
+
     body = ReplyMessageRequestBody.builder() \
         .msg_type("text") \
-        .content(json.dumps({"text": text})) \
+        .content(json.dumps({"text": text}, ensure_ascii=False)) \
         .build()
 
     request = ReplyMessageRequest.builder() \
