@@ -14,6 +14,7 @@ import os
 import re
 import json
 import uuid
+import asyncio
 import logging
 import threading
 
@@ -214,7 +215,14 @@ def _start_feishu_ws():
     """Initialize and start the Feishu WebSocket long-connection client.
 
     Runs in a daemon thread so it does not block FastAPI startup.
+    Must create a new event loop to avoid conflict with FastAPI's main loop.
     """
+    # Create a fresh event loop for this thread to avoid
+    # "RuntimeError: This event loop is already running" from lark_oapi's
+    # internal loop.run_until_complete() clashing with FastAPI's uvicorn loop.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     app_id = os.environ.get("FEISHU_APP_ID", "")
     app_secret = os.environ.get("FEISHU_APP_SECRET", "")
 
