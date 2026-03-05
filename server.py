@@ -1,16 +1,34 @@
-"""FastAPI Feishu Webhook Server
+"""FastAPI + Feishu WebSocket Long-Connection Server
 
-Receive Feishu event callbacks, route messages to LangGraph workflow.
+Uses lark-oapi SDK's WebSocket client to receive Feishu events
+via long connection (no public URL or webhook needed).
+FastAPI only serves a /health endpoint for cloud platform probes.
+
+Supported user commands (in Feishu chat):
+  /read_folder <folder_token_or_url>  - Read all docs & images from a Feishu folder
+  /read_doc <document_id>             - Read a single Feishu Docx document
+  (any other text)                    - Start or resume the LangGraph workflow
 """
 
+import os
+import re
+import json
 import uuid
 import logging
+import threading
+
+import lark_oapi as lark
+from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, BackgroundTasks
-from pydantic import BaseModel
+from fastapi import FastAPI
 
 from src.graph import build_graph
+from src.tools.feishu_integration import (
+    read_all_from_folder,
+    read_feishu_docx,
+    list_folder_files,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,28 +37,70 @@ logger = logging.getLogger(__name__)
 
 graph_app = None
 
+# Per-thread preloaded reference materials (text + images)
+# Populated by /read_folder or /read_doc commands before workflow starts
+_thread_refs: dict[str, dict] = {}
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global graph_app
-    graph_app = build_graph()
-    logger.info("LangGraph workflow compiled and ready.")
-    yield
+# ── Command patterns ────────────────────────────────────────────────
+
+_CMD_READ_FOLDER = re.compile(
+    r"^/read_folder\s+"
+    r"(?:https?://[a-zA-Z0-9.-]*feishu\.cn/drive/folder/)?([a-zA-Z0-9]+)\s*$",
+    re.IGNORECASE,
+)
+_CMD_READ_DOC = re.compile(
+    r"^/read_doc\s+"
+    r"(?:https?://[a-zA-Z0-9.-]*feishu\.cn/docx/)?([a-zA-Z0-9]+)\s*$",
+    re.IGNORECASE,
+)
 
 
-app = FastAPI(title="Feishu LangGraph Agent", lifespan=lifespan)
+# ── Command handlers ────────────────────────────────────────────────
+
+def _ensure_thread_refs(thread_id: str) -> dict:
+    if thread_id not in _thread_refs:
+        _thread_refs[thread_id] = {"text": "", "images": []}
+    return _thread_refs[thread_id]
 
 
-# ── Schemas ──────────────────────────────────────────────────────────
+def _handle_read_folder(thread_id: str, folder_token: str):
+    """Read a Feishu folder and cache results for this thread."""
+    try:
+        result = read_all_from_folder(folder_token)
+        refs = _ensure_thread_refs(thread_id)
+        if result["text_content"]:
+            refs["text"] += ("\n\n" if refs["text"] else "") + result["text_content"]
+        refs["images"].extend(result["image_list"])
+        logger.info(
+            "/read_folder %s done: +%d chars text, +%d images (thread=%s)",
+            folder_token, len(result["text_content"]), len(result["image_list"]), thread_id,
+        )
+    except Exception as e:
+        logger.error("/read_folder %s failed: %s", folder_token, e, exc_info=True)
 
-class FeishuChallenge(BaseModel):
-    challenge: str
+
+def _handle_read_doc(thread_id: str, document_id: str):
+    """Read a single Feishu Docx and cache results for this thread."""
+    try:
+        result = read_feishu_docx(document_id)
+        refs = _ensure_thread_refs(thread_id)
+        if result["text"]:
+            refs["text"] += ("\n\n" if refs["text"] else "") + result["text"]
+        refs["images"].extend(result["images"])
+        logger.info(
+            "/read_doc %s done: +%d chars text, +%d images (thread=%s)",
+            document_id, len(result["text"]), len(result["images"]), thread_id,
+        )
+    except Exception as e:
+        logger.error("/read_doc %s failed: %s", document_id, e, exc_info=True)
 
 
-# ── Background task: run / resume workflow ───────────────────────────
+# ── Workflow helpers ─────────────────────────────────────────────────
 
 def _run_workflow(thread_id: str, user_request: str):
-    """Start a new workflow in a background thread."""
+    """Start a new workflow, injecting any preloaded references."""
+    refs = _thread_refs.pop(thread_id, {"text": "", "images": []})
+
     initial_state = {
         "user_request": user_request,
         "current_script": "",
@@ -51,6 +111,8 @@ def _run_workflow(thread_id: str, user_request: str):
         "voice_design_content": "",
         "final_storyboard": "",
         "current_node": "",
+        "reference_images": refs["images"],
+        "reference_text": refs["text"],
     }
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -83,53 +145,123 @@ def _resume_workflow(thread_id: str, user_feedback: str):
         logger.info("Workflow finished (thread=%s)", thread_id)
 
 
-# ── Feishu Webhook Endpoint ──────────────────────────────────────────
+# ── Feishu message handler ──────────────────────────────────────────
 
-@app.post("/feishu/webhook")
-async def feishu_webhook(request: Request, background_tasks: BackgroundTasks):
-    body = await request.json()
-
-    # 1. URL Challenge verification
-    if body.get("type") == "url_verification":
-        return {"challenge": body["challenge"]}
-
-    # 2. Extract message from Feishu event callback (v2.0 schema)
-    event = body.get("event", {})
-    message = event.get("message", {})
-    msg_type = message.get("message_type", "")
-    chat_id = message.get("chat_id", "")
-
-    if msg_type != "text":
-        return {"code": 0, "msg": "ignored non-text message"}
-
-    import json as _json
-    text_content = _json.loads(message.get("content", "{}")).get("text", "").strip()
-    if not text_content:
-        return {"code": 0, "msg": "empty message"}
-
-    # Use chat_id as thread_id for conversation continuity.
-    # If no chat_id, generate a new thread.
-    thread_id = chat_id or str(uuid.uuid4())
-
-    # Check if there is an existing paused workflow for this thread
-    config = {"configurable": {"thread_id": thread_id}}
+def _handle_feishu_message(data: P2ImMessageReceiveV1) -> None:
+    """Handle im.message.receive_v1 event from Feishu WebSocket."""
     try:
-        state = graph_app.get_state(config)
-        if state.next:
-            # Workflow is paused at user_gate, treat message as feedback
-            logger.info("Resuming thread=%s with feedback: %s", thread_id, text_content[:50])
-            background_tasks.add_task(_resume_workflow, thread_id, text_content)
-            return {"code": 0, "msg": "resuming workflow"}
-    except Exception:
-        pass
+        message = data.event.message
+        msg_type = message.message_type
 
-    # No paused workflow, start a new one
-    logger.info("Starting new workflow thread=%s: %s", thread_id, text_content[:50])
-    background_tasks.add_task(_run_workflow, thread_id, text_content)
-    return {"code": 0, "msg": "workflow started"}
+        if msg_type != "text":
+            logger.info("Ignored non-text message type: %s", msg_type)
+            return
+
+        text_content = json.loads(message.content).get("text", "").strip()
+        if not text_content:
+            logger.info("Ignored empty message")
+            return
+
+        chat_id = message.chat_id
+        thread_id = chat_id or str(uuid.uuid4())
+
+        # --- Command dispatch ---
+
+        # /read_folder <token_or_url>
+        m = _CMD_READ_FOLDER.match(text_content)
+        if m:
+            folder_token = m.group(1)
+            logger.info("/read_folder command: %s (thread=%s)", folder_token, thread_id)
+            t = threading.Thread(target=_handle_read_folder, args=(thread_id, folder_token), daemon=True)
+            t.start()
+            return
+
+        # /read_doc <doc_id_or_url>
+        m = _CMD_READ_DOC.match(text_content)
+        if m:
+            doc_id = m.group(1)
+            logger.info("/read_doc command: %s (thread=%s)", doc_id, thread_id)
+            t = threading.Thread(target=_handle_read_doc, args=(thread_id, doc_id), daemon=True)
+            t.start()
+            return
+
+        # --- Workflow dispatch ---
+
+        # Check if there is a paused workflow for this thread
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            state = graph_app.get_state(config)
+            if state.next:
+                logger.info("Resuming thread=%s with feedback: %s", thread_id, text_content[:50])
+                t = threading.Thread(target=_resume_workflow, args=(thread_id, text_content), daemon=True)
+                t.start()
+                return
+        except Exception:
+            pass
+
+        # No paused workflow, start a new one
+        logger.info("Starting new workflow thread=%s: %s", thread_id, text_content[:50])
+        t = threading.Thread(target=_run_workflow, args=(thread_id, text_content), daemon=True)
+        t.start()
+
+    except Exception as e:
+        logger.error("Error handling Feishu message: %s", e, exc_info=True)
 
 
-# ── Health check ─────────────────────────────────────────────────────
+# ── Feishu WebSocket client ─────────────────────────────────────────
+
+def _start_feishu_ws():
+    """Initialize and start the Feishu WebSocket long-connection client.
+
+    Runs in a daemon thread so it does not block FastAPI startup.
+    """
+    app_id = os.environ.get("FEISHU_APP_ID", "")
+    app_secret = os.environ.get("FEISHU_APP_SECRET", "")
+
+    if not app_id or not app_secret:
+        logger.error(
+            "FEISHU_APP_ID or FEISHU_APP_SECRET not set. "
+            "Feishu WebSocket client will NOT start."
+        )
+        return
+
+    event_handler = (
+        lark.EventDispatcherHandler.builder("", "")
+        .register_p2_im_message_receive_v1(_handle_feishu_message)
+        .build()
+    )
+
+    cli = lark.ws.Client(
+        app_id,
+        app_secret,
+        event_handler=event_handler,
+        log_level=lark.LogLevel.INFO,
+    )
+
+    logger.info("Starting Feishu WebSocket client...")
+    cli.start()  # Blocking call — runs inside daemon thread
+
+
+# ── FastAPI lifespan ─────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global graph_app
+    graph_app = build_graph()
+    logger.info("LangGraph workflow compiled and ready.")
+
+    # Start Feishu WebSocket client in a background daemon thread
+    ws_thread = threading.Thread(target=_start_feishu_ws, daemon=True)
+    ws_thread.start()
+    logger.info("Feishu WebSocket thread launched.")
+
+    yield
+
+
+app = FastAPI(title="Feishu LangGraph Agent", lifespan=lifespan)
+
+
+# ── Health check (for cloud platform probes) ────────────────────────
 
 @app.get("/health")
 async def health():

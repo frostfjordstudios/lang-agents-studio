@@ -6,11 +6,14 @@ System Prompt 从 system_prompts/ 目录下的 Markdown 文件动态加载，
 
 import os
 import json
+import logging
 from pathlib import Path
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from .llm_config import get_creative_llm, get_slight_llm, get_coder_llm
 from .state import GraphState
+
+logger = logging.getLogger(__name__)
 
 # ── 路径配置 ────────────────────────────────────────────────────────
 
@@ -64,24 +67,45 @@ def _save_output(project_name: str, episode: int, subdir: str, filename: str, co
 
 # ── Agent 节点 ──────────────────────────────────────────────────────
 
+def _build_multimodal_message(text: str, images: list[str]) -> HumanMessage:
+    """构造 LangChain 多模态 HumanMessage（文本 + 图片）。
+
+    如果 images 为空，返回纯文本消息。
+    """
+    if not images:
+        return HumanMessage(content=text)
+
+    content: list[dict] = [{"type": "text", "text": text}]
+    for img_b64 in images:
+        content.append({"type": "image_url", "image_url": {"url": img_b64}})
+    return HumanMessage(content=content)
+
+
 def node_writer(state: GraphState) -> dict:
     """Writer（编剧）节点 - 根据用户需求生成剧本。
 
     动态加载 writer.md 作为 System Prompt，
     结合用户需求生成专业影视级剧本。
+    如果 state 中已有参考图片/文本（由 server 层预加载），会一并发送给大模型。
     """
-    # 动态加载 System Prompt
     writer_prompt = _load_prompt("agents", "writer", "writer.md")
+    ref_images = state.get("reference_images") or []
+    ref_text = state.get("reference_text", "")
+
+    user_text = (
+        f"请根据以下需求编写剧本：\n\n{state['user_request']}\n\n"
+        "请严格按照你的角色规范中定义的剧本格式输出。"
+    )
+    if ref_text:
+        user_text += f"\n\n--- 参考资料 ---\n{ref_text}"
+    if ref_images:
+        user_text += "\n\n以下附带了参考图片素材，请在创作中融入图片中的视觉元素和风格特征。"
 
     messages = [
         SystemMessage(content=writer_prompt),
-        HumanMessage(content=(
-            f"请根据以下需求编写剧本：\n\n{state['user_request']}\n\n"
-            "请严格按照你的角色规范中定义的剧本格式输出。"
-        )),
+        _build_multimodal_message(user_text, ref_images),
     ]
 
-    # 如果有之前的审核意见（修改循环），附加到消息中
     if state.get("director_review") and state.get("review_count", 0) > 0:
         messages.append(HumanMessage(content=(
             f"Director 审核意见如下，请据此修改剧本：\n\n{state['director_review']}"
@@ -148,18 +172,24 @@ def node_art_design(state: GraphState) -> dict:
     """Art-Design（美术设计）节点 - 生成角色/场景/道具设计方案。
 
     动态加载 art-design.md 和 art-design-skill.md。
+    支持多模态输入：复用 state 中由 node_writer 写入的参考图片。
     """
     art_prompt = _load_prompt("agents", "art-design", "art-design.md")
     art_skill = _load_skill("art-design-skill", "art-design-skill.md")
+    ref_images = state.get("reference_images") or []
 
     system_content = f"{art_prompt}\n\n--- 美术设计技能规范 ---\n{art_skill}"
 
+    user_text = (
+        f"请根据以下已确认的剧本，提取所有视觉元素并编写设计方案。\n\n"
+        f"--- 已确认剧本 ---\n{state['current_script']}"
+    )
+    if ref_images:
+        user_text += "\n\n以下附带了参考图片素材，请基于图片中的美术风格、配色、构图等元素来制定设计方案。"
+
     messages = [
         SystemMessage(content=system_content),
-        HumanMessage(content=(
-            f"请根据以下已确认的剧本，提取所有视觉元素并编写设计方案。\n\n"
-            f"--- 已确认剧本 ---\n{state['current_script']}"
-        )),
+        _build_multimodal_message(user_text, ref_images),
     ]
 
     llm = get_creative_llm()

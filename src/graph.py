@@ -209,6 +209,8 @@ def run_interactive(user_request: str):
         "voice_design_content": "",
         "final_storyboard": "",
         "current_node": "",
+        "reference_images": [],
+        "reference_text": "",
     }
 
     config = {"configurable": {"thread_id": "session-1"}}

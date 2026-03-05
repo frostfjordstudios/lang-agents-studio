@@ -18,3 +18,5 @@ class GraphState(TypedDict):
     voice_design_content: str   # 声音设计提示词
     final_storyboard: str       # 最终分镜提示词
     current_node: str           # 当前所处节点
+    reference_images: list[str] # 参考图片 Base64 Data URI 列表（由用户指令预加载）
+    reference_text: str         # 参考文本资料（由用户指令预加载）
