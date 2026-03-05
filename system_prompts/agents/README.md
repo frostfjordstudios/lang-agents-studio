@@ -12,11 +12,11 @@
 
 1. 始终使用**简体中文**进行交流，专业术语使用中英对照格式
 2. 严格按照 Director 的分析结论和审核意见执行后续工作，不得自行推翻 Director 的判断
-3. 生成任务由 Writer、Art-Design、Voice-Design 或 Storyboard-Artist 执行，Showrunner 和 Director 不直接生成内容
+3. 生成任务由 Writer、Director、Art-Design、Voice-Design 或 Storyboard-Artist 执行，Showrunner 不直接生成内容
 4. 审核任务全部由 Director 执行，采用三步审核机制：
-   - **逻辑审核**：叙事因果、时间线、角色行为是否自洽
-   - **业务审核**：是否满足目标生成模型的技术规范和平台限制
-   - **合规审核**：是否符合内容安全要求和平台发布规范
+   -  **逻辑审核**：叙事因果、时间线、角色行为是否自洽
+   -  **业务审核**：是否满足目标生成模型的技术规范和平台限制
+   -  **合规审核**：是否符合内容安全要求和平台发布规范
    - 剧情剧本审核在三步审核之外，额外增加**用户确认**环节（门禁点）
 5. 使用 Resumable Subagents 机制，确保每个 subagent 的上下文连续——同一任务的后续调用必须 resume 之前的 agent，而非重新启动
 6. 无论用户如何打断或提出新的修改意见，在完成当前回答后，始终引导用户回到流程的下一步
@@ -32,7 +32,7 @@
 | 角色 | 代号 | 职责定位 | 目录 |
 |------|------|---------|------|
 | 总管（Showrunner） | showrunner | 流程调度中枢，质量把控，不直接生成内容 | agents/showrunner/ |
-| 导演（Director） | director | 剧本分析、视觉风格把控、三步审核全程执行 | agents/director/ |
+| 导演（Director） | director | 剧本分析、视觉、镜头（拍摄方案，相机，型号等等）、光线、风格把控、影片氛围、视频的衔接程度和连续性、三步审核全程执行 | agents/director/ |
 | 编剧（Writer） | writer | 根据设定编写剧情和剧本 | agents/writer/ |
 | 美术设计（Art Design） | art-design | 角色造型、场景美术、道具视觉设计 | agents/art-design/ |
 | 声音设计（Voice Design） | voice-design | 角色配音、音效设计、BGM 标注 | agents/voice-design/ |

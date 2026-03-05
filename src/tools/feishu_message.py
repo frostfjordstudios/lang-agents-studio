@@ -38,6 +38,26 @@ from .feishu_integration import _get_client
 logger = logging.getLogger(__name__)
 
 
+def _strip_markdown(text: str) -> str:
+    """移除 Markdown 格式符号，保留纯文本。"""
+    import re
+    # **bold** / __bold__ → bold
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    # *italic* / _italic_ → italic
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'\1', text)
+    # ~~strikethrough~~ → strikethrough
+    text = re.sub(r'~~(.+?)~~', r'\1', text)
+    # `code` → code
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    # [text](url) → text
+    text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text)
+    # ### headings → headings
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    return text
+
+
 # ── 发送文本消息 ──────────────────────────────────────────────────────
 
 def send_text(chat_id: str, text: str) -> Optional[str]:
@@ -52,9 +72,10 @@ def send_text(chat_id: str, text: str) -> Optional[str]:
     """
     client = _get_client()
 
-    # Feishu text messages: ensure non-empty, truncate if too long (max ~30000 chars)
+    # Feishu text messages: clean markdown, ensure non-empty, truncate if too long
     if not text or not isinstance(text, str):
         text = "(空消息)"
+    text = _strip_markdown(text)
     if len(text) > 30000:
         text = text[:30000] + "\n\n... (内容过长，已截断)"
 

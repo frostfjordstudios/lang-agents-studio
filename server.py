@@ -4,14 +4,16 @@ Uses lark-oapi SDK's WebSocket client to receive Feishu events
 via long connection (no public URL or webhook needed).
 FastAPI only serves a /health endpoint for cloud platform probes.
 
-Supported user commands (in Feishu chat):
-  /read_folder <folder_token_or_url>  - Read all docs & images from a Feishu folder
-  /read_doc <document_id>             - Read a single Feishu Docx document
-  /stop                               - Stop the current workflow
-  /status                             - Show current workflow status
-  /help                               - List available commands
-  (image/file messages)               - Auto-saved as reference materials
-  (any other text)                    - Housekeeper chat or workflow resume
+All commands use @ prefix (in Feishu group chat):
+  @help                               - List available commands
+  @stop                               - Stop the current workflow
+  @status                             - Show current workflow status
+  @review_art                         - Review submitted art images
+  @read_folder <token_or_url>         - Read Feishu folder
+  @read_doc <doc_id_or_url>           - Read Feishu document
+  @agent_name <message>               - Talk to a specific agent
+  @all                                - Housekeeper acks, saves to context
+  (plain text)                        - Housekeeper handles daily chat
 """
 
 import os
@@ -30,7 +32,7 @@ from fastapi import FastAPI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.graph import build_graph
-from src.llm_config import get_housekeeper_llm
+from src.llm_config import get_housekeeper_llm, get_strict_llm
 from src.tools.feishu_integration import (
     read_all_from_folder,
     read_feishu_docx,
@@ -42,6 +44,16 @@ from src.tools.feishu_message import (
     download_message_image,
     download_message_file,
     image_bytes_to_base64,
+)
+from src.tools.doc_extract import extract_text, get_supported_extensions
+from src.tools.multi_bot import send_as_agent, AGENT_BOTS
+from src.agent_state import (
+    begin_session,
+    finish_session,
+    fail_session,
+    get_agent_context,
+    load_state as load_agent_state,
+    list_sessions,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -69,21 +81,30 @@ _thread_state: dict[str, dict] = {}
 _housekeeper_history: dict[str, list] = {}
 _HOUSEKEEPER_MAX_HISTORY = 20
 
-# ── Command patterns ──────────────────────────────────────────────────
+# Showrunner conversation history (last N turns per thread)
+_showrunner_history: dict[str, list] = {}
+_SHOWRUNNER_MAX_HISTORY = 20
+
+# ── Command patterns (@ prefix) ──────────────────────────────────────
+# 支持 @cmd 和 /cmd 两种形式（兼容旧习惯）
 
 _CMD_READ_FOLDER = re.compile(
-    r"^/read_folder\s+"
+    r"^[@/]read_folder\s+"
     r"(?:https?://[a-zA-Z0-9.-]*feishu\.cn/drive/folder/)?([a-zA-Z0-9]+)\s*$",
     re.IGNORECASE,
 )
 _CMD_READ_DOC = re.compile(
-    r"^/read_doc\s+"
+    r"^[@/]read_doc\s+"
     r"(?:https?://[a-zA-Z0-9.-]*feishu\.cn/docx/)?([a-zA-Z0-9]+)\s*$",
     re.IGNORECASE,
 )
-_CMD_STOP = re.compile(r"^/stop\s*$", re.IGNORECASE)
-_CMD_STATUS = re.compile(r"^/status\s*$", re.IGNORECASE)
-_CMD_HELP = re.compile(r"^/help\s*$", re.IGNORECASE)
+_CMD_STOP = re.compile(r"^[@/]stop\s*$", re.IGNORECASE)
+_CMD_STATUS = re.compile(r"^[@/]status\s*$", re.IGNORECASE)
+_CMD_HELP = re.compile(r"^[@/]help\s*$", re.IGNORECASE)
+_CMD_REVIEW_ART = re.compile(r"^[@/]review_art\s*$", re.IGNORECASE)
+
+# 文本 @agent 路由（用户直接在消息里打 @编剧、@导演 等）
+_TEXT_AT_AGENT = re.compile(r"^@(\S+)\s*(.*)", re.DOTALL)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -99,17 +120,93 @@ def _load_housekeeper_prompt() -> str:
     return filepath.read_text(encoding="utf-8")
 
 
+def _load_showrunner_prompt() -> str:
+    filepath = SYSTEM_PROMPTS_DIR / "agents" / "showrunner" / "showrunner.md"
+    return filepath.read_text(encoding="utf-8")
+
+
 # ── Node message templates ────────────────────────────────────────────
 
 _NODE_MESSAGES = {
-    "writer": "✍️ Writer | 编剧完成\n\n{summary}\n\n⏳ 进入 Director 审核...",
-    "director_review": "🎬 Director | 审核完成\n\n{summary}",
-    "user_gate": "🔔 需要你的确认\n\n{summary}\n\n请回复「通过」继续，或发送修改意见。",
-    "parallel_design": "🎨 美术设计 + 🔊 声音设计 | 完成\n\n⏳ 进入分镜编写...",
-    "storyboard": "📐 Storyboard | 分镜提示词完成\n\n{summary}\n\n⏳ 进入终审...",
-    "director_final_review": "🎬 Director | 终审完成\n\n{summary}",
+    # Phase 1
+    "writer": "✍️ 编剧完成\n\n{summary}\n\n⏳ 进入 Director 审核...",
+    "director_script_review": "🎬 Director 剧本审核完成\n\n{summary}\n\n⏳ 进入 Showrunner 审核...",
+    "showrunner_script_review": "🎯 Showrunner 审核完成\n\n{summary}",
+    "user_gate_script": "🔔 剧本需要你的确认\n\n{summary}\n\n请回复「通过」继续，或发送修改意见。",
+    # Phase 2
+    "director_breakdown": "🎬 导演拆解完成\n\n运镜/光线/风格/人物/道具/声音指令已生成\n\n⏳ 进入内容生产...",
+    # Phase 3
+    "parallel_production": "🎨 美术设计 + 🔊 声音设计 完成\n\n⏳ 进入 Director 审核...",
+    "director_production_review": "🎬 Director 生产审核完成\n\n{summary}",
+    "user_gate_production": "🔔 美术+声音需要你的确认\n\n{summary}\n\n请回复「通过」继续，或发送修改意见。",
+    # Phase 4
+    "storyboard": "📐 分镜提示词完成\n\n{summary}\n\n⏳ 进入 Director 终审...",
+    "director_storyboard_review": "🎬 Director 分镜终审完成\n\n{summary}",
+    "parallel_scoring": "📊 六角色并行评分完成\n\n导演/编剧/美术/声音/分镜/制片 已各自完成评分\n\n⏳ 制片汇总中...",
+    "scoring_summary": "🎯 多角色加权评分汇总完成\n\n{summary}",
     "save_outputs": "📦 所有产出物已保存",
 }
+
+_NODE_TO_AGENT = {
+    "writer": "writer",
+    "director_script_review": "director",
+    "showrunner_script_review": "showrunner",
+    "user_gate_script": "showrunner",
+    "director_breakdown": "director",
+    "parallel_production": "showrunner",
+    "director_production_review": "director",
+    "user_gate_production": "showrunner",
+    "storyboard": "storyboard",
+    "director_storyboard_review": "director",
+    "parallel_scoring": "showrunner",
+    "scoring_summary": "showrunner",
+    "save_outputs": "showrunner",
+}
+
+# 节点 → 主要输出字段（用于 agent_state 记录）
+_NODE_OUTPUT_FIELD = {
+    "writer": "current_script",
+    "director_script_review": "director_script_review",
+    "showrunner_script_review": "showrunner_script_review",
+    "director_breakdown": "director_breakdown",
+    "parallel_production": "art_design_content",
+    "director_production_review": "director_production_review",
+    "storyboard": "final_storyboard",
+    "director_storyboard_review": "director_storyboard_review",
+    "parallel_scoring": "scoring_director",
+    "scoring_summary": "final_scoring_report",
+}
+
+# 节点 → 所属阶段
+_NODE_PHASE = {
+    "writer": "phase_1", "director_script_review": "phase_1",
+    "showrunner_script_review": "phase_1", "user_gate_script": "phase_1",
+    "director_breakdown": "phase_2",
+    "parallel_production": "phase_3", "director_production_review": "phase_3",
+    "user_gate_production": "phase_3",
+    "storyboard": "phase_4", "director_storyboard_review": "phase_4",
+    "parallel_scoring": "phase_4", "scoring_summary": "phase_4",
+    "save_outputs": "phase_4",
+}
+
+
+def _track_node(project: str, node_name: str, node_output: dict, input_summary: str = ""):
+    """记录节点执行到 .agent-state.json（Resumable Subagents）。"""
+    agent = _NODE_TO_AGENT.get(node_name)
+    phase = _NODE_PHASE.get(node_name, "")
+    output_field = _NODE_OUTPUT_FIELD.get(node_name, "")
+
+    if not agent or not output_field:
+        return
+
+    key_output = node_output.get(output_field, "")
+    summary = key_output[:300] if key_output else "(no output)"
+
+    try:
+        sid = begin_session(project, agent, phase, input_summary or node_name)
+        finish_session(project, sid, output_summary=summary, key_output=key_output)
+    except Exception as e:
+        logger.warning("Agent state tracking failed for %s: %s", node_name, e)
 
 
 def _format_node_message(node_name: str, node_output: dict, state_values: dict) -> str:
@@ -122,19 +219,32 @@ def _format_node_message(node_name: str, node_output: dict, state_values: dict) 
     if node_name == "writer":
         script = node_output.get("current_script", "")
         summary = script[:800] + ("..." if len(script) > 800 else "")
-    elif node_name == "director_review":
-        review = node_output.get("director_review", "")
+    elif node_name == "director_script_review":
+        review = node_output.get("director_script_review", "")
         summary = review[:600] + ("..." if len(review) > 600 else "")
-    elif node_name == "user_gate":
-        review = state_values.get("director_review", "")
+    elif node_name == "showrunner_script_review":
+        review = node_output.get("showrunner_script_review", "")
+        summary = review[:600] + ("..." if len(review) > 600 else "")
+    elif node_name == "user_gate_script":
+        dr = state_values.get("director_script_review", "")[:400]
+        sr = state_values.get("showrunner_script_review", "")[:400]
         script_preview = state_values.get("current_script", "")[:300]
-        summary = f"📋 剧本摘要:\n{script_preview}...\n\n📝 审核意见:\n{review[:500]}"
+        summary = f"📋 剧本摘要:\n{script_preview}...\n\n🎬 Director:\n{dr}\n\n🎯 Showrunner:\n{sr}"
+    elif node_name == "director_production_review":
+        review = node_output.get("director_production_review", "")
+        summary = review[:600] + ("..." if len(review) > 600 else "")
+    elif node_name == "user_gate_production":
+        review = state_values.get("director_production_review", "")[:500]
+        summary = f"🎬 Director 审核:\n{review}"
     elif node_name == "storyboard":
         sb = node_output.get("final_storyboard", "")
         summary = sb[:600] + ("..." if len(sb) > 600 else "")
-    elif node_name == "director_final_review":
-        review = node_output.get("director_review", "")
+    elif node_name == "director_storyboard_review":
+        review = node_output.get("director_storyboard_review", "")
         summary = review[:600] + ("..." if len(review) > 600 else "")
+    elif node_name == "scoring_summary":
+        report = node_output.get("final_scoring_report", "")
+        summary = report[:800] + ("..." if len(report) > 800 else "")
 
     return template.format(summary=summary)
 
@@ -211,32 +321,220 @@ def _handle_status(chat_id: str, thread_id: str):
     except Exception:
         pass
 
+    art_queue = len(_art_feedback_images.get(thread_id, []))
     msg = (
         f"📊 当前状态\n\n"
         f"🔄 工作流: {status}\n"
         f"📍 最后节点: {last_node}{paused_at}\n"
         f"📎 已加载素材: {len(refs['images'])} 张图片, {len(refs['text'])} 字符文本"
     )
+    if art_queue:
+        msg += f"\n🎨 效果图队列: {art_queue} 张（发送 /review_art 开始评审）"
     send_text(chat_id, msg)
 
 
 def _handle_help(chat_id: str):
     """Show available commands."""
-    send_text(chat_id, (
-        "📖 可用命令\n\n"
-        "/read_folder <token或链接>\n"
-        "　　读取飞书文件夹中的文档和图片\n\n"
-        "/read_doc <文档ID或链接>\n"
-        "　　读取单个飞书文档\n\n"
-        "/stop\n"
-        "　　停止当前工作流\n\n"
-        "/status\n"
-        "　　查看当前状态和已加载素材\n\n"
-        "/help\n"
-        "　　显示此帮助信息\n\n"
-        "💡 直接发送图片或文件会自动存入参考素材\n"
-        "💡 发送文字直接与管家对话"
+    send_as_agent("housekeeper", chat_id, (
+        "📖 命令列表\n\n"
+        "@help　　　　显示此帮助\n"
+        "@stop　　　　停止当前工作流\n"
+        "@status　　　查看状态和素材\n"
+        "@review_art　评审效果图\n"
+        "@read_folder <token或链接>　读取飞书文件夹\n"
+        "@read_doc <文档ID或链接>　读取飞书文档\n\n"
+        "📣 对话\n"
+        "　　直接说话 → 管家接待\n"
+        "　　@编剧/导演/美术/声音/分镜/制片 → 对应成员回复\n"
+        "　　@所有人 → 管家代收\n\n"
+        "💡 发图片/文件自动存入素材\n"
+        "💡 支持 PDF, PPTX, DOCX, XLSX, TXT 等"
     ))
+
+
+# ── Art Feedback (美术效果图反馈) ────────────────────────────────────
+
+# Per-thread art feedback images (accumulated before /review_art)
+_art_feedback_images: dict[str, list[str]] = {}
+
+
+def _handle_review_art(chat_id: str, thread_id: str):
+    """Review user-submitted art images against art design spec, refine storyboard."""
+    images = _art_feedback_images.get(thread_id, [])
+    if not images:
+        send_text(chat_id, "⚠️ 还没有收到效果图\n\n请先发送生成的美术效果图，然后再使用 /review_art 命令。")
+        return
+
+    # Get the workflow state to find art_design_content and storyboard
+    state_info = _thread_state.get(thread_id, {})
+    config = {"configurable": {"thread_id": thread_id}}
+
+    art_design = ""
+    storyboard = ""
+    try:
+        graph_state = graph_app.get_state(config)
+        state_values = graph_state.values or {}
+        art_design = state_values.get("art_design_content", "")
+        storyboard = state_values.get("final_storyboard", "")
+    except Exception:
+        pass
+
+    if not art_design and not storyboard:
+        send_text(chat_id, "⚠️ 当前没有美术设计方案或分镜数据\n\n请先完成一次创作工作流，再提交效果图进行反馈。")
+        return
+
+    send_text(chat_id, f"🎨 正在分析 {len(images)} 张效果图...\n\n⏳ 对比美术设计方案并生成反馈")
+
+    try:
+        _run_art_feedback(chat_id, thread_id, images, art_design, storyboard)
+    except Exception as e:
+        logger.error("Art feedback error: %s", e, exc_info=True)
+        send_text(chat_id, f"❌ 效果图分析出错: {e}")
+
+
+def _run_art_feedback(
+    chat_id: str,
+    thread_id: str,
+    images: list[str],
+    art_design: str,
+    storyboard: str,
+):
+    """Use LLM to compare generated art against design spec and refine storyboard."""
+    from src.nodes import _build_multimodal_message
+
+    prompt = (
+        "你是一位资深的美术总监和视觉效果评审专家。\n\n"
+        "用户已经基于美术设计方案生成了效果图，请你：\n"
+        "1. 逐张分析效果图，评估与美术设计方案的符合程度\n"
+        "2. 指出效果图中的亮点和不足\n"
+        "3. 基于效果图的实际效果，给出优化后的视频分镜提示词\n"
+        "4. 提出下一轮效果图生成的改进建议\n\n"
+        "输出格式：\n"
+        "📊 效果评估\n"
+        "（逐张评分和点评）\n\n"
+        "✅ 亮点\n"
+        "（列出做得好的地方）\n\n"
+        "⚠️ 需改进\n"
+        "（列出需要调整的地方）\n\n"
+        "📐 优化分镜提示词\n"
+        "（基于实际效果图优化后的完整分镜提示词）\n\n"
+        "💡 下一轮建议\n"
+        "（改进建议）"
+    )
+
+    user_text = f"以下是用户提交的 {len(images)} 张效果图，请与美术设计方案进行对比。\n\n"
+    if art_design:
+        user_text += f"--- 美术设计方案 ---\n{art_design[:3000]}\n\n"
+    if storyboard:
+        user_text += f"--- 当前分镜提示词 ---\n{storyboard[:3000]}\n\n"
+    user_text += "请分析以下效果图："
+
+    llm = get_housekeeper_llm()
+    messages = [
+        SystemMessage(content=prompt),
+        _build_multimodal_message(user_text, images),
+    ]
+
+    response = llm.invoke(messages)
+
+    raw = response.content
+    if isinstance(raw, str):
+        reply = raw
+    elif isinstance(raw, list):
+        reply = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in raw
+        )
+    else:
+        reply = str(raw) if raw else ""
+
+    # Send feedback to chat
+    send_text(chat_id, reply)
+
+    # Clear feedback images after review
+    _art_feedback_images[thread_id] = []
+
+    logger.info("Art feedback sent (thread=%s, images=%d)", thread_id, len(images))
+
+
+# ── Showrunner Agent (主对接人) ───────────────────────────────────────
+
+def _handle_showrunner(chat_id: str, message_id: str, text: str, thread_id: str):
+    """Showrunner direct conversation — main user interface for creative requests.
+
+    If the user expresses a creative need, Showrunner replies with
+    [ACTION:START_WORKFLOW] to trigger the LangGraph workflow.
+    """
+    try:
+        prompt = _load_showrunner_prompt()
+
+        if thread_id not in _showrunner_history:
+            _showrunner_history[thread_id] = []
+        history = _showrunner_history[thread_id]
+
+        messages = [SystemMessage(content=prompt)]
+
+        # System context + Resumable Subagents 历史
+        refs = _thread_refs.get(thread_id, {"text": "", "images": []})
+        state_info = _thread_state.get(thread_id, {})
+        project = state_info.get("project", f"proj_{thread_id[-8:]}")
+
+        # 加载制片的历史 session 上下文
+        showrunner_ctx = get_agent_context(project, "showrunner")
+
+        context = (
+            f"[系统上下文] 当前已加载素材: {len(refs['images'])} 张图片, "
+            f"{len(refs['text'])} 字符文本。"
+            f"工作流状态: {state_info.get('status', 'idle')}。"
+            f"\n\n"
+            f"你是制片总监 Showrunner，是用户的主要对接人。"
+            f"当用户表达了明确的创作需求（如写剧本、制作短剧等），"
+            f"请在回复末尾加上 [ACTION:START_WORKFLOW] 来启动工作流。"
+            f"如果用户只是在闲聊或提问，正常回复即可，不要加标记。"
+        )
+        if showrunner_ctx:
+            context += f"\n\n{showrunner_ctx}"
+        messages.append(HumanMessage(content=context))
+
+        for msg in history[-_SHOWRUNNER_MAX_HISTORY:]:
+            messages.append(msg)
+
+        messages.append(HumanMessage(content=text))
+
+        llm = get_strict_llm()
+        response = llm.invoke(messages)
+
+        raw = response.content
+        if isinstance(raw, str):
+            reply_content = raw
+        elif isinstance(raw, list):
+            reply_content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw
+            )
+        else:
+            reply_content = str(raw) if raw else ""
+
+        logger.info("Showrunner reply (len=%d): %s", len(reply_content), reply_content[:100])
+
+        # Save to history
+        history.append(HumanMessage(content=text))
+        history.append(response)
+        if len(history) > _SHOWRUNNER_MAX_HISTORY * 2:
+            _showrunner_history[thread_id] = history[-_SHOWRUNNER_MAX_HISTORY:]
+
+        # Check if showrunner wants to start a workflow
+        if "[ACTION:START_WORKFLOW]" in reply_content:
+            clean_reply = reply_content.replace("[ACTION:START_WORKFLOW]", "").strip()
+            send_as_agent("showrunner", chat_id, clean_reply)
+            logger.info("Showrunner triggered workflow: thread=%s", thread_id)
+            _run_workflow(chat_id, thread_id, text)
+        else:
+            send_as_agent("showrunner", chat_id, reply_content)
+
+    except Exception as e:
+        logger.error("Showrunner error: %s", e, exc_info=True)
+        send_text(chat_id, f"❌ 制片暂时无法回复: {e}")
 
 
 # ── Housekeeper Agent ─────────────────────────────────────────────────
@@ -299,11 +597,11 @@ def _handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str
         # Check if housekeeper wants to start a workflow
         if "[ACTION:START_WORKFLOW]" in reply_content:
             clean_reply = reply_content.replace("[ACTION:START_WORKFLOW]", "").strip()
-            send_text(chat_id, clean_reply)
+            send_as_agent("housekeeper", chat_id, clean_reply)
             logger.info("Housekeeper triggered workflow: thread=%s", thread_id)
             _run_workflow(chat_id, thread_id, text)
         else:
-            send_text(chat_id, reply_content)
+            send_as_agent("housekeeper", chat_id, reply_content)
 
     except Exception as e:
         logger.error("Housekeeper error: %s", e, exc_info=True)
@@ -318,20 +616,42 @@ def _run_workflow(chat_id: str, thread_id: str, user_request: str):
 
     _thread_state[thread_id] = {"status": "running", "chat_id": chat_id, "last_node": ""}
 
-    send_text(chat_id, "🚀 创作工作流已启动\n\n✍️ Writer 正在编写剧本...")
+    send_as_agent("showrunner", chat_id, "🚀 创作工作流已启动\n\n✍️ Writer 正在编写剧本...")
+
+    # 项目名：用 thread_id 的后 8 位 + 时间戳生成可读名称
+    project_name = _thread_state[thread_id].get("project", f"proj_{thread_id[-8:]}")
+    _thread_state[thread_id]["project"] = project_name
 
     initial_state = {
         "user_request": user_request,
-        "current_script": "",
-        "director_review": "",
-        "review_count": 0,
-        "user_feedback": "",
-        "art_design_content": "",
-        "voice_design_content": "",
-        "final_storyboard": "",
-        "current_node": "",
         "reference_images": refs["images"],
         "reference_text": refs["text"],
+        "project_name": project_name,
+        "current_script": "",
+        "director_script_review": "",
+        "showrunner_script_review": "",
+        "script_review_count": 0,
+        "user_script_feedback": "",
+        "director_breakdown": "",
+        "art_design_content": "",
+        "voice_design_content": "",
+        "director_production_review": "",
+        "production_review_count": 0,
+        "user_production_feedback": "",
+        "final_storyboard": "",
+        "director_storyboard_review": "",
+        "storyboard_review_count": 0,
+        "scoring_director": "",
+        "scoring_writer": "",
+        "scoring_art": "",
+        "scoring_voice": "",
+        "scoring_storyboard": "",
+        "scoring_showrunner": "",
+        "final_scoring_report": "",
+        "art_feedback_images": [],
+        "art_feedback_result": "",
+        "refined_storyboard": "",
+        "current_node": "",
     }
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -357,10 +677,14 @@ def _run_workflow(chat_id: str, thread_id: str, user_request: str):
                 # Merge output into accumulated state
                 accumulated_state.update(node_output)
 
-                # Push message for key nodes
+                # Push message for key nodes (as the corresponding agent)
                 msg = _format_node_message(current, node_output, accumulated_state)
                 if msg:
-                    send_text(chat_id, msg)
+                    agent = _NODE_TO_AGENT.get(current, "housekeeper")
+                    send_as_agent(agent, chat_id, msg)
+
+                # Resumable Subagents: 持久化节点产出
+                _track_node(project_name, current, node_output, user_request[:200])
 
         state = graph_app.get_state(config)
         if state.next:
@@ -379,11 +703,22 @@ def _run_workflow(chat_id: str, thread_id: str, user_request: str):
 def _resume_workflow(chat_id: str, thread_id: str, user_feedback: str):
     """Resume a paused workflow with user feedback."""
     config = {"configurable": {"thread_id": thread_id}}
-    graph_app.update_state(config, {"user_feedback": user_feedback})
 
-    _thread_state[thread_id] = {"status": "running", "chat_id": chat_id, "last_node": ""}
+    # Determine which gate we're paused at and set the right feedback field
+    state = graph_app.get_state(config)
+    next_nodes = state.next if state.next else ()
+    if "user_gate_script" in next_nodes:
+        graph_app.update_state(config, {"user_script_feedback": user_feedback})
+    elif "user_gate_production" in next_nodes:
+        graph_app.update_state(config, {"user_production_feedback": user_feedback})
+    else:
+        # Fallback
+        graph_app.update_state(config, {"user_script_feedback": user_feedback})
 
-    send_text(chat_id, "🔄 收到反馈，工作流恢复中...")
+    project_name = _thread_state.get(thread_id, {}).get("project", f"proj_{thread_id[-8:]}")
+    _thread_state[thread_id] = {"status": "running", "chat_id": chat_id, "last_node": "", "project": project_name}
+
+    send_as_agent("showrunner", chat_id, "🔄 收到反馈，工作流恢复中...")
 
     try:
         for event in graph_app.stream(None, config):
@@ -405,7 +740,11 @@ def _resume_workflow(chat_id: str, thread_id: str, user_feedback: str):
                 full_state = graph_app.get_state(config).values
                 msg = _format_node_message(current, node_output, full_state)
                 if msg:
-                    send_text(chat_id, msg)
+                    agent = _NODE_TO_AGENT.get(current, "housekeeper")
+                    send_as_agent(agent, chat_id, msg)
+
+                # Resumable Subagents: 持久化节点产出
+                _track_node(project_name, current, node_output, f"resume: {user_feedback[:100]}")
 
         state = graph_app.get_state(config)
         if state.next:
@@ -424,18 +763,34 @@ def _resume_workflow(chat_id: str, thread_id: str, user_feedback: str):
 # ── Image/File message handlers ──────────────────────────────────────
 
 def _handle_image_message(chat_id: str, message_id: str, content: dict, thread_id: str):
-    """Download image from message and store as reference."""
+    """Download image from message and store as reference or art feedback."""
     try:
         image_key = content.get("image_key", "")
         if not image_key:
             return
 
         image_bytes = download_message_image(message_id, image_key)
-        if image_bytes:
-            refs = _ensure_thread_refs(thread_id)
-            b64 = image_bytes_to_base64(image_bytes)
-            refs["images"].append(b64)
+        if not image_bytes:
+            return
 
+        b64 = image_bytes_to_base64(image_bytes)
+
+        # If workflow is finished, store as art feedback image
+        state_info = _thread_state.get(thread_id, {})
+        if state_info.get("status") == "finished":
+            if thread_id not in _art_feedback_images:
+                _art_feedback_images[thread_id] = []
+            _art_feedback_images[thread_id].append(b64)
+            count = len(_art_feedback_images[thread_id])
+            send_text(
+                chat_id,
+                f"🎨 效果图已收到 ({count} 张)\n\n"
+                f"继续发送更多效果图，或发送 @review_art 开始评审。",
+            )
+        else:
+            # Store as reference material
+            refs = _ensure_thread_refs(thread_id)
+            refs["images"].append(b64)
             send_text(
                 chat_id,
                 f"📎 图片已收到并存入参考素材\n\n"
@@ -447,7 +802,12 @@ def _handle_image_message(chat_id: str, message_id: str, content: dict, thread_i
 
 
 def _handle_file_message(chat_id: str, message_id: str, content: dict, thread_id: str):
-    """Download file from message and store appropriately."""
+    """Download file from message and store appropriately.
+
+    - Image files → store as Base64 reference image
+    - Documents (PDF/PPTX/DOCX/XLSX/TXT...) → extract text, store as reference text
+    - Other files → acknowledge receipt
+    """
     try:
         file_key = content.get("file_key", "")
         file_name = content.get("file_name", "unknown")
@@ -455,10 +815,10 @@ def _handle_file_message(chat_id: str, message_id: str, content: dict, thread_id
         if not file_key:
             return
 
-        # Check if it's an image file
         image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
         ext = os.path.splitext(file_name)[1].lower()
 
+        # ── Image file → store as reference image
         if ext in image_exts:
             result = download_message_file(message_id, file_key)
             if result:
@@ -472,17 +832,151 @@ def _handle_file_message(chat_id: str, message_id: str, content: dict, thread_id
                     f"📎 图片文件 {file_name} 已存入参考素材\n"
                     f"🖼️ 当前共 {len(refs['images'])} 张参考图片",
                 )
-        else:
-            # Non-image files: acknowledge receipt, store token for future use
-            send_text(
-                chat_id,
-                f"📎 文件 {file_name} 已收到\n\n"
-                f"ℹ️ 当前支持图片类文件自动存入参考素材。\n"
-                f"文档类文件请使用 /read_doc 命令读取飞书文档。",
-            )
+            return
+
+        # ── Document file → extract text and store
+        supported_exts = get_supported_extensions()
+        if ext in supported_exts:
+            send_text(chat_id, f"📄 正在解析 {file_name}...")
+            result = download_message_file(message_id, file_key)
+            if not result:
+                send_text(chat_id, f"❌ 文件 {file_name} 下载失败")
+                return
+
+            file_bytes, _ = result
+            text = extract_text(file_bytes, file_name)
+
+            if text and text.strip():
+                refs = _ensure_thread_refs(thread_id)
+                header = f"--- {file_name} ---\n"
+                refs["text"] += ("\n\n" if refs["text"] else "") + header + text.strip()
+
+                # Truncate display for long text
+                preview = text.strip()[:200]
+                send_text(
+                    chat_id,
+                    f"✅ {file_name} 解析完成\n\n"
+                    f"📄 提取 {len(text)} 字符文本\n"
+                    f"📎 已存入参考素材\n\n"
+                    f"预览:\n{preview}...",
+                )
+            else:
+                send_text(chat_id, f"⚠️ {file_name} 未能提取到文本内容")
+            return
+
+        # ── Other files → acknowledge only
+        send_text(
+            chat_id,
+            f"📎 文件 {file_name} 已收到\n\n"
+            f"ℹ️ 暂不支持 {ext} 格式的自动解析。\n"
+            f"支持的格式: PDF, PPTX, DOCX, XLSX, TXT, CSV, JSON, MD 等",
+        )
     except Exception as e:
         logger.error("Handle file message failed: %s", e, exc_info=True)
         send_text(chat_id, "❌ 文件处理失败，请重试。")
+
+
+# ── @mention 解析 ────────────────────────────────────────────────────
+
+# Agent 显示名→内部名 映射（飞书群里机器人名称 → agent_name）
+_MENTION_NAME_MAP: dict[str, str] = {
+    "总管": "showrunner", "showrunner": "showrunner", "制片": "showrunner",
+    "管家": "housekeeper", "housekeeper": "housekeeper",
+    "编剧": "writer", "writer": "writer",
+    "导演": "director", "director": "director",
+    "美术": "art_design", "art_design": "art_design", "美术设计": "art_design",
+    "声音": "voice_design", "voice_design": "voice_design", "声音设计": "voice_design",
+    "分镜": "storyboard", "storyboard": "storyboard", "分镜师": "storyboard",
+}
+
+
+def _parse_mentions(message) -> tuple[list[str], bool]:
+    """解析消息中的 @mention，返回 (被@的agent列表, 是否@了所有人)。
+
+    飞书消息 mentions 结构:
+      message.mentions = [{"key": "@_user_1", "id": {"open_id": "..."}, "name": "xxx"}, ...]
+      @所有人的 id.open_id 通常为 "all"
+    """
+    mentioned_agents: list[str] = []
+    is_at_all = False
+
+    mentions = getattr(message, "mentions", None)
+    if not mentions:
+        return mentioned_agents, is_at_all
+
+    for mention in mentions:
+        # mention 可能是 dict 或对象
+        if isinstance(mention, dict):
+            name = mention.get("name", "").lower().strip()
+            m_id = mention.get("id", {})
+            open_id = m_id.get("open_id", "") if isinstance(m_id, dict) else ""
+        else:
+            name = getattr(mention, "name", "").lower().strip()
+            m_id = getattr(mention, "id", None)
+            open_id = getattr(m_id, "open_id", "") if m_id else ""
+
+        if open_id == "all" or name == "所有人":
+            is_at_all = True
+            continue
+
+        agent = _MENTION_NAME_MAP.get(name)
+        if agent:
+            mentioned_agents.append(agent)
+
+    return mentioned_agents, is_at_all
+
+
+# ── 通用 Agent 对话 ─────────────────────────────────────────────────
+
+def _handle_agent_chat(agent_name: str, chat_id: str, message_id: str, text: str, thread_id: str):
+    """Route chat to a specific agent by name. Showrunner/Housekeeper use their
+    dedicated handlers; other agents get a short, work-focused LLM reply."""
+    if agent_name == "showrunner":
+        _handle_showrunner(chat_id, message_id, text, thread_id)
+        return
+    if agent_name == "housekeeper":
+        _handle_housekeeper(chat_id, message_id, text, thread_id)
+        return
+
+    # Other agents: minimal work-focused reply
+    try:
+        agent_prompt_map = {
+            "writer": "writer/writer.md",
+            "director": "director/director.md",
+            "art_design": "art-design/art-design.md",
+            "voice_design": "voice-design/voice-design.md",
+            "storyboard": "storyboard-artist/storyboard-artist.md",
+        }
+        prompt_file = agent_prompt_map.get(agent_name)
+        if prompt_file:
+            filepath = SYSTEM_PROMPTS_DIR / "agents" / prompt_file
+            sys_prompt = filepath.read_text(encoding="utf-8")
+        else:
+            sys_prompt = f"你是{agent_name}，简洁回复即可。"
+
+        from src.llm_config import get_creative_llm
+        llm = get_creative_llm()
+        messages = [
+            SystemMessage(content=sys_prompt + "\n\n请简洁回复，控制在两三句话以内，以工作为重。"),
+            HumanMessage(content=text),
+        ]
+        response = llm.invoke(messages)
+
+        raw = response.content
+        if isinstance(raw, str):
+            reply = raw
+        elif isinstance(raw, list):
+            reply = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw
+            )
+        else:
+            reply = str(raw) if raw else ""
+
+        send_as_agent(agent_name, chat_id, reply)
+    except Exception as e:
+        logger.error("Agent %s chat error: %s", agent_name, e, exc_info=True)
+        send_as_agent(agent_name, chat_id, "收到，稍后处理。")
 
 
 # ── Feishu message handler ────────────────────────────────────────────
@@ -496,6 +990,9 @@ def _handle_feishu_message(data: P2ImMessageReceiveV1) -> None:
         message_id = message.message_id
         thread_id = chat_id or str(uuid.uuid4())
         content = json.loads(message.content) if message.content else {}
+
+        # ── Parse @mentions ──
+        mentioned_agents, is_at_all = _parse_mentions(message)
 
         # ── Image message ──
         if msg_type == "image":
@@ -528,28 +1025,56 @@ def _handle_feishu_message(data: P2ImMessageReceiveV1) -> None:
             return
 
         text_content = content.get("text", "").strip()
-        if not text_content:
+        # Strip Feishu @mention placeholders like @_user_1 from text
+        clean_text = re.sub(r"@_user_\d+", "", text_content).strip()
+        if not clean_text and not is_at_all:
             return
 
-        # --- Command dispatch ---
+        # ── @所有人 → 管家代表团队回复"收到"，不浪费 token ──
+        if is_at_all:
+            refs = _ensure_thread_refs(thread_id)
+            if clean_text:
+                refs["text"] += ("\n\n" if refs["text"] else "") + f"[全员通知] {clean_text}"
+            send_as_agent("housekeeper", chat_id, "收到👌")
+            logger.info("@all received, ack sent (thread=%s)", thread_id)
+            return
 
-        # /help
-        if _CMD_HELP.match(text_content):
+        # ── 飞书原生 @mention（点选机器人）→ 路由到该 Agent ──
+        if mentioned_agents:
+            target_agent = mentioned_agents[0]
+            logger.info("@%s (mention) handling: thread=%s", target_agent, thread_id)
+            t = threading.Thread(
+                target=_handle_agent_chat,
+                args=(target_agent, chat_id, message_id, clean_text, thread_id),
+                daemon=True,
+            )
+            t.start()
+            return
+
+        # ── @command 派发（@help, @stop, @read_folder 等） ──
+
+        if _CMD_HELP.match(clean_text):
             _handle_help(chat_id)
             return
 
-        # /stop
-        if _CMD_STOP.match(text_content):
+        if _CMD_STOP.match(clean_text):
             _handle_stop(chat_id, thread_id)
             return
 
-        # /status
-        if _CMD_STATUS.match(text_content):
+        if _CMD_STATUS.match(clean_text):
             _handle_status(chat_id, thread_id)
             return
 
-        # /read_folder <token_or_url>
-        m = _CMD_READ_FOLDER.match(text_content)
+        if _CMD_REVIEW_ART.match(clean_text):
+            t = threading.Thread(
+                target=_handle_review_art,
+                args=(chat_id, thread_id),
+                daemon=True,
+            )
+            t.start()
+            return
+
+        m = _CMD_READ_FOLDER.match(clean_text)
         if m:
             folder_token = m.group(1)
             t = threading.Thread(
@@ -560,8 +1085,7 @@ def _handle_feishu_message(data: P2ImMessageReceiveV1) -> None:
             t.start()
             return
 
-        # /read_doc <doc_id_or_url>
-        m = _CMD_READ_DOC.match(text_content)
+        m = _CMD_READ_DOC.match(clean_text)
         if m:
             doc_id = m.group(1)
             t = threading.Thread(
@@ -572,16 +1096,32 @@ def _handle_feishu_message(data: P2ImMessageReceiveV1) -> None:
             t.start()
             return
 
-        # --- Workflow resume (if paused) ---
+        # ── 文本 @agent 路由（用户打字 @编剧 / @导演 等）──
+        at_match = _TEXT_AT_AGENT.match(clean_text)
+        if at_match:
+            at_name = at_match.group(1).lower().strip()
+            at_body = at_match.group(2).strip()
+            agent = _MENTION_NAME_MAP.get(at_name)
+            if agent:
+                logger.info("@%s (text) handling: thread=%s", agent, thread_id)
+                t = threading.Thread(
+                    target=_handle_agent_chat,
+                    args=(agent, chat_id, message_id, at_body or "你好", thread_id),
+                    daemon=True,
+                )
+                t.start()
+                return
+
+        # ── Workflow resume (if paused) ──
 
         config = {"configurable": {"thread_id": thread_id}}
         try:
             state = graph_app.get_state(config)
             if state.next:
-                logger.info("Resuming thread=%s with feedback: %s", thread_id, text_content[:50])
+                logger.info("Resuming thread=%s with feedback: %s", thread_id, clean_text[:50])
                 t = threading.Thread(
                     target=_resume_workflow,
-                    args=(chat_id, thread_id, text_content),
+                    args=(chat_id, thread_id, clean_text),
                     daemon=True,
                 )
                 t.start()
@@ -589,12 +1129,12 @@ def _handle_feishu_message(data: P2ImMessageReceiveV1) -> None:
         except Exception:
             pass
 
-        # --- Default: Housekeeper Agent ---
+        # ── Default: 管家（Housekeeper）处理日常对话 ──
 
-        logger.info("Housekeeper handling: thread=%s, text=%s", thread_id, text_content[:50])
+        logger.info("Housekeeper handling (default): thread=%s, text=%s", thread_id, clean_text[:50])
         t = threading.Thread(
             target=_handle_housekeeper,
-            args=(chat_id, message_id, text_content, thread_id),
+            args=(chat_id, message_id, clean_text, thread_id),
             daemon=True,
         )
         t.start()
