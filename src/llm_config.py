@@ -53,3 +53,8 @@ def get_strict_llm() -> ChatGoogleGenerativeAI:
 def get_coder_llm() -> ChatGoogleGenerativeAI:
     """Storyboard-Artist 使用 (temperature=0.05)"""
     return _build_llm(temperature=0.05)
+
+
+def get_housekeeper_llm() -> ChatGoogleGenerativeAI:
+    """Housekeeper（项目管家）使用 (temperature=0.9)"""
+    return _build_llm(temperature=0.9)
