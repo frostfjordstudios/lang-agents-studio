@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from .llm_config import llm_creative, llm_slight, llm_coder
+from .llm_config import get_creative_llm, get_slight_llm, get_coder_llm
 from .state import GraphState
 
 # ── 路径配置 ────────────────────────────────────────────────────────
@@ -87,7 +87,8 @@ def node_writer(state: GraphState) -> dict:
             f"Director 审核意见如下，请据此修改剧本：\n\n{state['director_review']}"
         )))
 
-    response = llm_creative.invoke(messages)
+    llm = get_creative_llm()
+    response = llm.invoke(messages)
 
     return {
         "current_script": response.content,
@@ -121,7 +122,8 @@ def node_director_review(state: GraphState) -> dict:
         )),
     ]
 
-    response = llm_slight.invoke(messages)
+    llm = get_slight_llm()
+    response = llm.invoke(messages)
     review_count = state.get("review_count", 0) + 1
 
     return {
@@ -160,7 +162,8 @@ def node_art_design(state: GraphState) -> dict:
         )),
     ]
 
-    response = llm_creative.invoke(messages)
+    llm = get_creative_llm()
+    response = llm.invoke(messages)
 
     return {
         "art_design_content": response.content,
@@ -183,7 +186,8 @@ def node_voice_design(state: GraphState) -> dict:
         )),
     ]
 
-    response = llm_creative.invoke(messages)
+    llm = get_creative_llm()
+    response = llm.invoke(messages)
 
     return {
         "voice_design_content": response.content,
@@ -218,7 +222,8 @@ def node_storyboard(state: GraphState) -> dict:
         )),
     ]
 
-    response = llm_coder.invoke(messages)
+    llm = get_coder_llm()
+    response = llm.invoke(messages)
 
     return {
         "final_storyboard": response.content,
@@ -251,7 +256,8 @@ def node_director_final_review(state: GraphState) -> dict:
         )),
     ]
 
-    response = llm_slight.invoke(messages)
+    llm = get_slight_llm()
+    response = llm.invoke(messages)
 
     return {
         "director_review": response.content,

@@ -8,6 +8,7 @@
 """
 
 import os
+import sqlite3
 from pathlib import Path
 
 from langgraph.graph import StateGraph, END
@@ -174,12 +175,13 @@ def build_graph():
         db_path = str(Path(__file__).resolve().parent.parent / "data" / "checkpoints.sqlite")
 
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    checkpointer = SqliteSaver.from_conn_string(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    memory = SqliteSaver(conn)
 
     # interrupt_before="user_gate" 会在进入门禁节点前暂停，
     # 等待外部输入 user_feedback 后 resume
     app = workflow.compile(
-        checkpointer=checkpointer,
+        checkpointer=memory,
         interrupt_before=["user_gate"],
     )
 
