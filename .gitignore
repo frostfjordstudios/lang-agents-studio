@@ -1,0 +1,26 @@
+# Environment variables (keep .env.example as template)
+.env
+*.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Local database / checkpoints
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
