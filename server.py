@@ -273,7 +273,20 @@ def _handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str
 
         llm = get_housekeeper_llm()
         response = llm.invoke(messages)
-        reply_content = response.content
+
+        # Extract text: response.content may be str or list of content parts
+        raw = response.content
+        if isinstance(raw, str):
+            reply_content = raw
+        elif isinstance(raw, list):
+            reply_content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in raw
+            )
+        else:
+            reply_content = str(raw) if raw else ""
+
+        logger.info("Housekeeper reply (len=%d): %s", len(reply_content), reply_content[:100])
 
         # Save to history
         history.append(HumanMessage(content=text))
@@ -287,7 +300,6 @@ def _handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str
         if "[ACTION:START_WORKFLOW]" in reply_content:
             clean_reply = reply_content.replace("[ACTION:START_WORKFLOW]", "").strip()
             send_text(chat_id, clean_reply)
-            # Start the workflow with the user's text as the request
             logger.info("Housekeeper triggered workflow: thread=%s", thread_id)
             _run_workflow(chat_id, thread_id, text)
         else:
