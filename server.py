@@ -213,14 +213,20 @@ def _handle_feishu_message(data: P2ImMessageReceiveV1) -> None:
 def _start_feishu_ws():
     """Initialize and start the Feishu WebSocket long-connection client.
 
-    Runs in a daemon thread BEFORE uvicorn starts, so there is no
-    existing asyncio event loop to conflict with.
-    lark_oapi's cli.start() internally calls loop.run_until_complete(),
-    which requires that no other event loop is running in the process yet.
+    lark_oapi's ws.Client uses a MODULE-LEVEL global `loop` variable
+    (created at import time via asyncio.get_event_loop()). When uvicorn
+    starts its own event loop on the main thread, that global loop becomes
+    "already running", causing cli.start() → loop.run_until_complete()
+    to crash with RuntimeError.
+
+    Fix: Replace the SDK's module-level `loop` with a fresh event loop
+    dedicated to this daemon thread.
     """
-    # Ensure this thread has its own clean event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    import lark_oapi.ws.client as _ws_mod
+
+    # Override the SDK's global loop with a new, thread-local one
+    _ws_mod.loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_ws_mod.loop)
 
     app_id = os.environ.get("FEISHU_APP_ID", "")
     app_secret = os.environ.get("FEISHU_APP_SECRET", "")
