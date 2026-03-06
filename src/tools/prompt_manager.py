@@ -33,7 +33,7 @@ def get_prompt(*path_parts: str) -> str:
     filepath = SYSTEM_PROMPTS_DIR.joinpath(*path_parts)
     if not filepath.exists():
         raise FileNotFoundError(f"System Prompt not found: {filepath}")
-    content = filepath.read_text(encoding="utf-8")
+    content = filepath.read_text(encoding="utf-8", errors="replace")
     logger.debug("Loaded prompt into cache: %s (%d chars)", filepath.name, len(content))
     return content
 

@@ -58,7 +58,7 @@ def read_prompt_file(file_path: str) -> str:
         return f"文件不存在: {file_path}"
     if not target.is_file():
         return f"不是文件: {file_path}"
-    return target.read_text(encoding="utf-8")
+    return target.read_text(encoding="utf-8", errors="replace")
 
 
 @tool
@@ -92,7 +92,7 @@ def edit_prompt_file(file_path: str, old_text: str, new_text: str) -> str:
     if not target.exists():
         return f"文件不存在: {file_path}"
 
-    current = target.read_text(encoding="utf-8")
+    current = target.read_text(encoding="utf-8", errors="replace")
     if old_text not in current:
         return f"未找到匹配文本，替换失败。请检查 old_text 是否精确。"
 

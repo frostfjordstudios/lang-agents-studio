@@ -50,7 +50,7 @@ from src.tools.doc_extract import extract_text, get_supported_extensions
 from src.tools.multi_bot import send_as_agent, AGENT_BOTS
 from src.tools.search_helper import SEARCH_TOOLS, get_search_tool
 from src.tools.prompt_editor import PROMPT_EDITOR_TOOLS
-from src.tools.chat_helper import generate_dynamic_reply, generate_idle_replies, _extract_text
+from src.tools.chat_helper import generate_work_reply, generate_idle_replies, _extract_text
 from src.tools.prompt_manager import get_agent_prompt, get_skill_prompt, preload_all, clear_cache as clear_prompt_cache
 from langgraph.prebuilt import create_react_agent
 from src.agent_state import (
@@ -281,12 +281,12 @@ def _format_node_message(node_name: str, node_output: dict, state_values: dict) 
     if gate_template:
         summary = ""
         if node_name == "user_gate_script":
-            dr = state_values.get("director_script_review", "")[:400]
-            sr = state_values.get("showrunner_script_review", "")[:400]
-            script_preview = state_values.get("current_script", "")[:300]
+            dr = str(state_values.get("director_script_review", ""))[:400]
+            sr = str(state_values.get("showrunner_script_review", ""))[:400]
+            script_preview = str(state_values.get("current_script", ""))[:300]
             summary = f"📋 剧本摘要:\n{script_preview}...\n\n🎬 Director:\n{dr}\n\n🎯 Showrunner:\n{sr}"
         elif node_name == "user_gate_production":
-            review = state_values.get("director_production_review", "")[:500]
+            review = str(state_values.get("director_production_review", ""))[:500]
             summary = f"🎬 Director 审核:\n{review}"
         return gate_template.format(summary=summary)
 
@@ -301,10 +301,12 @@ def _format_node_message(node_name: str, node_output: dict, state_values: dict) 
     output_field = _NODE_OUTPUT_FIELD.get(node_name, "")
     key_output = node_output.get(output_field, "") if output_field else ""
     if key_output:
+        if not isinstance(key_output, str):
+            key_output = str(key_output)
         excerpt = key_output[:200] + ("..." if len(key_output) > 200 else "")
         situation += f"。产出摘要：{excerpt}"
 
-    return generate_dynamic_reply(agent, situation)
+    return generate_work_reply(agent, situation)
 
 
 # ── Command handlers ──────────────────────────────────────────────────
