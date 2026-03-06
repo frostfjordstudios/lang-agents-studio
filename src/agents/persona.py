@@ -16,7 +16,7 @@ import logging
 import threading
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from src.core.llm_config import get_creative_llm
+from src.core.llm_config import get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ def _safe_llm_call(system_msg: str, user_msg: str) -> str | None:
         return None
 
     try:
-        llm = get_creative_llm()
+        llm = get_llm("housekeeper")
         response = llm.invoke([
             SystemMessage(content=system_msg),
             HumanMessage(content=user_msg),
@@ -293,7 +293,7 @@ def generate_idle_replies(user_text: str, count: int = 2) -> list[tuple[str, str
     )
 
     try:
-        llm = get_creative_llm()
+        llm = get_llm("housekeeper")
         response = llm.invoke([
             SystemMessage(content=system_msg),
             HumanMessage(content=f"老板说：「{user_text}」"),

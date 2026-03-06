@@ -23,7 +23,7 @@ from lark_oapi.api.docx.v1 import (
     ListDocumentBlockResponse,
 )
 
-from .client import get_client
+from ..client import get_client
 
 logger = logging.getLogger(__name__)
 

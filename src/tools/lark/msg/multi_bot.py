@@ -7,6 +7,8 @@
   FEISHU_BOT_WRITER_APP_ID=cli_xxx
   FEISHU_BOT_WRITER_APP_SECRET=xxx
   ... 以此类推
+
+Bot 配置从 registry.py 自动生成，新增 Agent 无需手动维护此文件。
 """
 
 import os
@@ -21,6 +23,8 @@ from lark_oapi.api.im.v1 import (
     CreateMessageRequest,
     CreateMessageRequestBody,
 )
+
+from src.core.registry import get_all_agents
 
 load_dotenv()
 
@@ -37,16 +41,11 @@ class BotConfig:
     app_secret: str = ""
 
 
-# ── Agent -> Bot 映射配置 ────────────────────────────────────────────
+# ── Agent -> Bot 映射配置（从 registry 自动生成）─────────────────────
 
 AGENT_BOTS: dict[str, BotConfig] = {
-    "showrunner": BotConfig("showrunner", "总管", "🎯"),
-    "housekeeper": BotConfig("housekeeper", "管家", "🏠"),
-    "writer": BotConfig("writer", "编剧", "✍️"),
-    "director": BotConfig("director", "导演", "🎬"),
-    "art_design": BotConfig("art_design", "美术设计", "🎨"),
-    "voice_design": BotConfig("voice_design", "声音设计", "🔊"),
-    "storyboard": BotConfig("storyboard", "分镜师", "📐"),
+    a.name: BotConfig(a.name, a.display_name, a.emoji)
+    for a in get_all_agents()
 }
 
 
@@ -102,7 +101,10 @@ def get_agent_prefix(agent_name: str) -> str:
     config = AGENT_BOTS.get(agent_name)
     if config:
         return f"{config.emoji} {config.display_name} | "
-    return ""
+    # 回退到 registry（覆盖新增但未重启的 Agent）
+    from src.core.registry import get_display_name
+    dn = get_display_name(agent_name)
+    return f"{dn} | " if dn != agent_name else ""
 
 
 def is_multi_bot_enabled(agent_name: str) -> bool:
@@ -117,7 +119,7 @@ def send_as_agent(agent_name: str, chat_id: str, text: str) -> Optional[str]:
     如果该 Agent 有独立 bot，使用独立 bot 发送；
     否则使用默认 bot 发送，消息前加 Agent 身份前缀。
     """
-    from .message import send_text, _strip_markdown
+    from .messaging import send_text, _strip_markdown
 
     client = get_bot_client(agent_name)
 

@@ -1,4 +1,4 @@
-"""LangGraph 计算图编排 - 四阶段工作流
+"""影视组 LangGraph 计算图编排 - 四阶段工作流
 
 Phase 1: Writer -> Director剧本审核 -> Showrunner审核 -> 用户门禁
 Phase 2: Director剧本拆解
@@ -13,7 +13,7 @@ from pathlib import Path
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from .state import GraphState
+from src.core.state import GraphState
 from .nodes import (
     node_writer,
     node_director_script_review,
@@ -300,7 +300,7 @@ def build_graph():
     if os.path.exists("/app"):
         db_path = "/app/data/checkpoints.sqlite"
     else:
-        db_path = str(Path(__file__).resolve().parent.parent.parent / "data" / "checkpoints.sqlite")
+        db_path = str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "checkpoints.sqlite")
 
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)

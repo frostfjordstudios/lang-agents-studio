@@ -1,7 +1,7 @@
-"""LLM 配置模块 - 使用 Google Gemini 作为基础大模型
+"""LLM 配置模块 — 温度由全局 Agent 注册表驱动
 
-所有 LLM 实例通过工厂函数延迟创建（Lazy Initialization），
-确保应用启动时不会因环境变量缺失而崩溃。
+所有角色的温度设定统一在 registry.py 中管理，
+本模块只负责构建 LLM 实例。
 """
 
 import os
@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 _MODEL = "gemini-3.1-pro-preview"
 
+from src.core.registry import get_temperature  # noqa: E402
+
+
+# ── 核心构建函数 ─────────────────────────────────────────────────────
 
 def _build_llm(temperature: float) -> ChatGoogleGenerativeAI:
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -33,28 +37,7 @@ def _build_llm(temperature: float) -> ChatGoogleGenerativeAI:
     )
 
 
-# ── 工厂函数（按角色分配） ───────────────────────────────────────────
-
-def get_creative_llm() -> ChatGoogleGenerativeAI:
-    """Writer, Art-Design, Voice-Design 使用 (temperature=0.7)"""
-    return _build_llm(temperature=0.7)
-
-
-def get_slight_llm() -> ChatGoogleGenerativeAI:
-    """Director 使用 (temperature=0.15)"""
-    return _build_llm(temperature=0.15)
-
-
-def get_strict_llm() -> ChatGoogleGenerativeAI:
-    """Showrunner 使用 (temperature=0.1)"""
-    return _build_llm(temperature=0.1)
-
-
-def get_coder_llm() -> ChatGoogleGenerativeAI:
-    """Storyboard-Artist 使用 (temperature=0.05)"""
-    return _build_llm(temperature=0.05)
-
-
-def get_housekeeper_llm() -> ChatGoogleGenerativeAI:
-    """Housekeeper（项目管家）使用 (temperature=0.9)"""
-    return _build_llm(temperature=0.9)
+def get_llm(role: str) -> ChatGoogleGenerativeAI:
+    """根据角色名获取对应温度的 LLM 实例（温度由 registry 驱动）。"""
+    temp = get_temperature(role)
+    return _build_llm(temperature=temp)

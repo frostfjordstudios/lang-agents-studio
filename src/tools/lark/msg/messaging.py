@@ -34,7 +34,7 @@ from lark_oapi.api.im.v1 import (
     GetMessageResourceResponse,
 )
 
-from .client import get_client
+from ..client import get_client
 
 logger = logging.getLogger(__name__)
 

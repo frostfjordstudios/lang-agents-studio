@@ -4,7 +4,7 @@
     python main.py
 """
 
-from src.agents.graph import build_graph
+from src.agents.media_group.workflow import build_graph
 
 
 def main():

@@ -54,6 +54,11 @@ class GraphState(TypedDict):
     art_feedback_result: str        # 美术效果图反馈/优化建议
     refined_storyboard: str         # 基于效果图优化后的分镜提示词
 
+    # ── 联邦路由 ──
+    target_group: str               # 路由目标: "studio" | "dev" | "chat"
+    direct_assignee: str            # 直接指派的 Agent 名称（可选）
+    review_count: int               # 通用审核计数器
+
     # ── 元数据 ──
     project_name: str               # 项目名称（用于文件持久化）
     current_node: str               # 当前所处节点

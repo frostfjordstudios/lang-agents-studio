@@ -72,22 +72,24 @@ def get_agent_prompt(role_name: str) -> str:
     """加载 Agent 角色提示词。
 
     role_name 映射规则：
-      "writer"      -> agents/writer/writer.md
-      "director"    -> agents/director/director.md
-      "showrunner"  -> agents/showrunner/showrunner.md
-      "art_design"  -> agents/art-design/art-design.md
-      "voice_design"-> agents/voice-design/voice-design.md
-      "storyboard"  -> agents/storyboard-artist/storyboard-artist.md
-      "housekeeper" -> agents/housekeeper/housekeeper.md
+      "housekeeper" -> agents/management/housekeeper/housekeeper.md
+      "writer"      -> agents/media_group/writer/writer.md
+      "director"    -> agents/media_group/director/director.md
+      "showrunner"  -> agents/media_group/showrunner/showrunner.md
+      "art_design"  -> agents/media_group/art-design/art-design.md
+      "voice_design"-> agents/media_group/voice-design/voice-design.md
+      "storyboard"  -> agents/media_group/storyboard-artist/storyboard-artist.md
     """
     _AGENT_PATH_MAP = {
-        "writer": ("agents", "writer", "writer.md"),
-        "director": ("agents", "director", "director.md"),
-        "showrunner": ("agents", "showrunner", "showrunner.md"),
-        "art_design": ("agents", "art-design", "art-design.md"),
-        "voice_design": ("agents", "voice-design", "voice-design.md"),
-        "storyboard": ("agents", "storyboard-artist", "storyboard-artist.md"),
-        "housekeeper": ("agents", "housekeeper", "housekeeper.md"),
+        # management
+        "housekeeper": ("agents", "management", "housekeeper", "housekeeper.md"),
+        # media_group
+        "writer": ("agents", "media_group", "writer", "writer.md"),
+        "director": ("agents", "media_group", "director", "director.md"),
+        "showrunner": ("agents", "media_group", "showrunner", "showrunner.md"),
+        "art_design": ("agents", "media_group", "art-design", "art-design.md"),
+        "voice_design": ("agents", "media_group", "voice-design", "voice-design.md"),
+        "storyboard": ("agents", "media_group", "storyboard-artist", "storyboard-artist.md"),
     }
     parts = _AGENT_PATH_MAP.get(role_name)
     if not parts:
@@ -153,7 +155,7 @@ def preload_all():
             logger.warning("Preload skip: %s", e)
 
     # Also load gate-rules and workflow
-    for extra in [("agents", "showrunner", "gate-rules.md"),
+    for extra in [("agents", "media_group", "showrunner", "gate-rules.md"),
                   ("agents", "workflow.md")]:
         try:
             get_prompt(*extra)
