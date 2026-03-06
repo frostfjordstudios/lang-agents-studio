@@ -290,20 +290,7 @@ def _format_node_message(node_name: str, node_output: dict, state_values: dict) 
         excerpt = key_output[:200] + ("..." if len(key_output) > 200 else "")
         situation += f"。产出摘要：{excerpt}"
 
-    reply = generate_dynamic_reply(agent, situation)
-
-    # 对于有大段产出的节点，在动态回复后附上关键内容
-    detail = ""
-    if node_name == "writer":
-        script = node_output.get("current_script", "")
-        if script:
-            detail = "\n\n" + script[:800] + ("..." if len(script) > 800 else "")
-    elif node_name in ("scoring_summary",):
-        report = node_output.get("final_scoring_report", "")
-        if report:
-            detail = "\n\n" + report[:800] + ("..." if len(report) > 800 else "")
-
-    return reply + detail
+    return generate_dynamic_reply(agent, situation)
 
 
 # ── Command handlers ──────────────────────────────────────────────────
@@ -680,11 +667,15 @@ def _handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str
             status = _thread_state.get(thread_id, {}).get("status", "idle")
             if status in ("idle", "finished", "error", "stopped"):
                 try:
-                    idle_replies = generate_idle_replies(text, count=random.randint(1, 2))
+                    count = random.randint(1, 2)
+                    logger.info("Idle chat triggered: status=%s, count=%d", status, count)
+                    idle_replies = generate_idle_replies(text, count=count)
+                    logger.info("Idle chat got %d replies", len(idle_replies))
                     for role, idle_text in idle_replies:
+                        logger.info("Idle reply from %s: %s", role, idle_text[:50])
                         send_as_agent(role, chat_id, idle_text)
                 except Exception as idle_err:
-                    logger.warning("Idle chat failed: %s", idle_err)
+                    logger.warning("Idle chat failed: %s", idle_err, exc_info=True)
 
     except Exception as e:
         logger.error("Housekeeper error: %s", e, exc_info=True)

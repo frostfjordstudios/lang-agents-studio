@@ -22,7 +22,10 @@ import logging
 from typing import Optional
 from dataclasses import dataclass, field
 
+from dotenv import load_dotenv
 import lark_oapi as lark
+
+load_dotenv()  # 确保 .env 在凭证加载前已读取
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,7 @@ AGENT_BOTS: dict[str, BotConfig] = {
 
 def _load_bot_credentials():
     """从环境变量加载各 Agent 的独立 bot 凭证（如果配置了的话）。"""
+    loaded = []
     for agent_name, config in AGENT_BOTS.items():
         env_prefix = f"FEISHU_BOT_{agent_name.upper()}"
         app_id = os.environ.get(f"{env_prefix}_APP_ID", "")
@@ -59,7 +63,14 @@ def _load_bot_credentials():
         if app_id and app_secret:
             config.app_id = app_id
             config.app_secret = app_secret
-            logger.info("Loaded bot credentials for agent: %s", agent_name)
+            loaded.append(agent_name)
+        else:
+            logger.debug("No credentials for %s (env: %s_APP_ID)", agent_name, env_prefix)
+
+    if loaded:
+        logger.info("Multi-bot mode: loaded %d bots — %s", len(loaded), ", ".join(loaded))
+    else:
+        logger.info("Single-bot mode: no independent bot credentials found")
 
 
 # 模块加载时尝试读取
