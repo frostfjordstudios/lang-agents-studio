@@ -45,11 +45,38 @@ dispatcher = Dispatcher(graph_app)
 
 # ── Feishu WebSocket（多机器人模式）──────────────────────────────────
 
-def _start_bot_ws(app_id: str, app_secret: str, bot_name: str):
-    """为单个机器人启动 WebSocket 长连接。"""
+def _collect_bot_configs() -> list[tuple[str, str, str]]:
+    """收集所有有凭证的机器人配置，返回 [(app_id, app_secret, name), ...]。"""
+    bots = []
+    main_id = os.environ.get("FEISHU_APP_ID", "")
+    main_secret = os.environ.get("FEISHU_APP_SECRET", "")
+    seen_ids = set()
+
+    if main_id and main_secret:
+        bots.append((main_id, main_secret, "main/housekeeper"))
+        seen_ids.add(main_id)
+
+    for name, config in AGENT_BOTS.items():
+        if config.app_id and config.app_secret and config.app_id not in seen_ids:
+            bots.append((config.app_id, config.app_secret, name))
+            seen_ids.add(config.app_id)
+
+    return bots
+
+
+def _run_all_bots_ws():
+    """在单个线程 + 单个 event loop 中运行所有机器人的 WebSocket。"""
     import lark_oapi.ws.client as _ws_mod
-    _ws_mod.loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(_ws_mod.loop)
+
+    bot_configs = _collect_bot_configs()
+    if not bot_configs:
+        logger.error("No bot credentials found — no WebSocket connections started.")
+        return
+
+    # 创建共享 event loop，替换模块级 loop
+    shared_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(shared_loop)
+    _ws_mod.loop = shared_loop
 
     event_handler = (
         lark.EventDispatcherHandler.builder("", "")
@@ -57,45 +84,38 @@ def _start_bot_ws(app_id: str, app_secret: str, bot_name: str):
         .build()
     )
 
-    cli = lark.ws.Client(
-        app_id, app_secret,
-        event_handler=event_handler,
-        log_level=lark.LogLevel.INFO,
-    )
+    async def _start_one(app_id, app_secret, bot_name):
+        cli = lark.ws.Client(
+            app_id, app_secret,
+            event_handler=event_handler,
+            log_level=lark.LogLevel.INFO,
+        )
+        logger.info("Connecting bot [%s]...", bot_name)
+        try:
+            await cli._connect()
+        except Exception as e:
+            logger.error("Bot [%s] connect failed: %s", bot_name, e)
+            await cli._disconnect()
+            if cli._auto_reconnect:
+                await cli._reconnect()
+            else:
+                return
+        shared_loop.create_task(cli._ping_loop())
+        logger.info("Bot [%s] connected.", bot_name)
 
-    logger.info("Starting WebSocket for bot [%s]...", bot_name)
-    cli.start()
+    async def _main():
+        tasks = [_start_one(aid, asec, name) for aid, asec, name in bot_configs]
+        await asyncio.gather(*tasks)
+        logger.info("All %d bot(s) connected, entering event loop.", len(bot_configs))
+        # 永久阻塞，保持 WebSocket 连接
+        await _ws_mod._select()
 
-
-def _launch_all_bots():
-    """启动所有有凭证的机器人的 WebSocket 连接。"""
-    launched = []
-
-    # 主机器人（管家）
-    main_id = os.environ.get("FEISHU_APP_ID", "")
-    main_secret = os.environ.get("FEISHU_APP_SECRET", "")
-    if main_id and main_secret:
-        t = threading.Thread(target=_start_bot_ws, args=(main_id, main_secret, "main/housekeeper"), daemon=True)
-        t.start()
-        launched.append("main/housekeeper")
-
-    # 各 Agent 独立机器人
-    for name, config in AGENT_BOTS.items():
-        if config.app_id and config.app_secret:
-            # 跳过与主机器人相同凭证的（避免重复连接）
-            if config.app_id == main_id:
-                continue
-            t = threading.Thread(target=_start_bot_ws, args=(config.app_id, config.app_secret, name), daemon=True)
-            t.start()
-            launched.append(name)
-
-    if launched:
-        logger.info("Launched %d bot WebSocket(s): %s", len(launched), ", ".join(launched))
-    else:
-        logger.error("No bot credentials found — no WebSocket connections started.")
+    shared_loop.run_until_complete(_main())
 
 
-_launch_all_bots()
+_ws_thread = threading.Thread(target=_run_all_bots_ws, daemon=True)
+_ws_thread.start()
+logger.info("Feishu multi-bot WebSocket thread launched.")
 
 # ── FastAPI ──────────────────────────────────────────────────────────
 
