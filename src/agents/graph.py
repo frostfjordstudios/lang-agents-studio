@@ -1,9 +1,9 @@
 """LangGraph 计算图编排 - 四阶段工作流
 
-Phase 1: Writer → Director剧本审核 → Showrunner审核 → 用户门禁
+Phase 1: Writer -> Director剧本审核 -> Showrunner审核 -> 用户门禁
 Phase 2: Director剧本拆解
-Phase 3: Art+Voice并行生产 → Director审核 → 用户门禁
-Phase 4: Storyboard → Director分镜审核(带重试) → 多角色并行评分 → 汇总 → 保存
+Phase 3: Art+Voice并行生产 -> Director审核 -> 用户门禁
+Phase 4: Storyboard -> Director分镜审核(带重试) -> 多角色并行评分 -> 汇总 -> 保存
 """
 
 import os
@@ -40,31 +40,42 @@ from .nodes import (
 # ── 条件分支函数 ─────────────────────────────────────────────────────
 
 def should_continue_after_director_script(state: GraphState) -> str:
-    """Director 剧本审核后：通过→Showrunner审核，不通过→退回Writer。"""
+    """Director 剧本审核后：通过->Showrunner审核，不通过->退回Writer。
+
+    强制熔断：review_count >= 3 时无论结果如何，强制通过。
+    """
     review = state.get("director_script_review", "")
     count = state.get("script_review_count", 0)
 
     if "全部通过" in review or "✅" in review:
         return "showrunner_script_review"
 
-    if count < 3:
-        return "writer"
+    if count >= 3:
+        return "showrunner_script_review"
 
-    return "showrunner_script_review"
+    return "writer"
 
 
 def should_continue_after_showrunner_script(state: GraphState) -> str:
-    """Showrunner 剧本审核后：通过→用户门禁，不通过→退回Writer。"""
+    """Showrunner 剧本审核后：通过->用户门禁，不通过->退回Writer。
+
+    强制熔断：script_review_count >= 3 时无论 Showrunner 意见如何，强制通过。
+    """
     review = state.get("showrunner_script_review", "")
+    count = state.get("script_review_count", 0)
 
     if "全部通过" in review or "✅ 全部通过" in review:
+        return "user_gate_script"
+
+    # 强制熔断：如果已经循环了 3 次，不再退回 Writer
+    if count >= 3:
         return "user_gate_script"
 
     return "writer"
 
 
 def should_continue_after_user_script(state: GraphState) -> str:
-    """用户剧本审核后：通过→导演拆解，退回→Writer修改。"""
+    """用户剧本审核后：通过->导演拆解，退回->Writer修改。"""
     feedback = state.get("user_script_feedback", "")
 
     if feedback and ("修改" in feedback or "不通过" in feedback or "重写" in feedback):
@@ -74,21 +85,24 @@ def should_continue_after_user_script(state: GraphState) -> str:
 
 
 def should_continue_after_director_production(state: GraphState) -> str:
-    """Director 生产审核后：通过→用户门禁，不通过→退回生产。"""
+    """Director 生产审核后：通过->用户门禁，不通过->退回生产。
+
+    强制熔断：production_review_count >= 3 时强制通过。
+    """
     review = state.get("director_production_review", "")
     count = state.get("production_review_count", 0)
 
     if "全部通过" in review or "✅" in review:
         return "user_gate_production"
 
-    if count < 3:
-        return "parallel_production"
+    if count >= 3:
+        return "user_gate_production"
 
-    return "user_gate_production"
+    return "parallel_production"
 
 
 def should_continue_after_user_production(state: GraphState) -> str:
-    """用户生产审核后：通过→分镜，退回→重新生产。"""
+    """用户生产审核后：通过->分镜，退回->重新生产。"""
     feedback = state.get("user_production_feedback", "")
 
     if feedback and ("修改" in feedback or "不通过" in feedback or "重做" in feedback):
@@ -98,17 +112,20 @@ def should_continue_after_user_production(state: GraphState) -> str:
 
 
 def should_continue_after_director_storyboard(state: GraphState) -> str:
-    """Director 分镜审核后：通过→多角色并行评分，不通过→退回Storyboard。"""
+    """Director 分镜审核后：通过->多角色并行评分，不通过->退回Storyboard。
+
+    强制熔断：storyboard_review_count >= 3 时强制通过。
+    """
     review = state.get("director_storyboard_review", "")
     count = state.get("storyboard_review_count", 0)
 
     if "全部通过" in review or "✅" in review:
         return "parallel_scoring"
 
-    if count < 3:
-        return "storyboard"
+    if count >= 3:
+        return "parallel_scoring"
 
-    return "parallel_scoring"
+    return "storyboard"
 
 
 # ── 并行节点包装 ─────────────────────────────────────────────────────
@@ -178,7 +195,6 @@ def node_save_outputs(state: GraphState) -> dict:
         _save_output(project_name, episode, "审核记录",
                      "分镜终审.md", state["director_storyboard_review"])
 
-    # 各角色评分
     scoring_fields = {
         "scoring_director": "导演评分.md",
         "scoring_writer": "编剧评分.md",
@@ -249,7 +265,7 @@ def build_graph():
         {"director_breakdown": "director_breakdown", "writer": "writer"},
     )
 
-    # ── Phase 2 → Phase 3 ──
+    # ── Phase 2 -> Phase 3 ──
     workflow.add_edge("director_breakdown", "parallel_production")
 
     # ── Phase 3 ──
@@ -284,7 +300,7 @@ def build_graph():
     if os.path.exists("/app"):
         db_path = "/app/data/checkpoints.sqlite"
     else:
-        db_path = str(Path(__file__).resolve().parent.parent / "data" / "checkpoints.sqlite")
+        db_path = str(Path(__file__).resolve().parent.parent.parent / "data" / "checkpoints.sqlite")
 
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)

@@ -16,7 +16,7 @@ import logging
 import threading
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from src.llm_config import get_creative_llm
+from src.core.llm_config import get_creative_llm
 
 logger = logging.getLogger(__name__)
 

@@ -3,34 +3,6 @@
 每个项目维护一份 .agent-state.json，记录 Showrunner 与各 Agent
 之间的每次交互。当服务重启、上下文清除或 token 耗尽时，
 Agent 可通过 session_id 恢复上下文继续工作。
-
-文件结构 (projects/<project>/.agent-state.json):
-{
-  "project": "my_project",
-  "created_at": "...",
-  "updated_at": "...",
-  "current_phase": "phase_1",
-  "sessions": {
-    "<session_id>": {
-      "agent": "writer",
-      "phase": "phase_1",
-      "status": "completed|running|failed",
-      "started_at": "...",
-      "finished_at": "...",
-      "input_summary": "用户需求摘要...",
-      "output_summary": "产出摘要...",
-      "key_output": "完整产出内容",
-      "review_notes": "审核意见（如有）",
-      "retry_count": 0,
-      "parent_session": null  // 上游 session（如 writer → director_review）
-    }
-  },
-  "agent_latest": {
-    "writer": "<latest_session_id>",
-    "director": "<latest_session_id>",
-    ...
-  }
-}
 """
 
 import json
@@ -42,7 +14,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 PROJECTS_DIR = BASE_DIR / "projects"
 
 _STATE_FILENAME = ".agent-state.json"
@@ -108,10 +80,7 @@ def begin_session(
     input_summary: str,
     parent_session: Optional[str] = None,
 ) -> str:
-    """开始一个新的 Agent 会话，返回 session_id。
-
-    在 Agent 节点执行前调用。
-    """
+    """开始一个新的 Agent 会话，返回 session_id。"""
     state = load_state(project)
     session_id = f"{agent}_{uuid.uuid4().hex[:8]}"
 
@@ -144,10 +113,7 @@ def finish_session(
     review_notes: str = "",
     status: str = "completed",
 ) -> None:
-    """完成一个 Agent 会话。
-
-    在 Agent 节点执行后调用。
-    """
+    """完成一个 Agent 会话。"""
     state = load_state(project)
     session = state["sessions"].get(session_id)
     if not session:
@@ -193,15 +159,10 @@ def get_latest_session(project: str, agent: str) -> Optional[dict]:
 
 
 def get_agent_context(project: str, agent: str) -> str:
-    """为 Agent 生成恢复上下文摘要。
-
-    当 Agent 需要继续工作时，调用此函数获取之前的产出和审核意见，
-    注入到 System Prompt 中，实现上下文恢复。
-    """
+    """为 Agent 生成恢复上下文摘要。"""
     state = load_state(project)
     sessions = state.get("sessions", {})
 
-    # 收集该 Agent 的所有历史 session（按时间排序）
     agent_sessions = [
         (sid, s) for sid, s in sessions.items()
         if s["agent"] == agent
@@ -212,7 +173,7 @@ def get_agent_context(project: str, agent: str) -> str:
         return ""
 
     lines = [f"[{agent} 历史上下文]"]
-    for sid, s in agent_sessions[-3:]:  # 最近 3 次
+    for sid, s in agent_sessions[-3:]:
         status_icon = {"completed": "✅", "failed": "❌", "running": "🔄"}.get(s["status"], "❓")
         lines.append(f"\n{status_icon} Session {sid}")
         if s.get("input_summary"):
@@ -226,10 +187,7 @@ def get_agent_context(project: str, agent: str) -> str:
 
 
 def get_phase_context(project: str, phase: str) -> str:
-    """获取某个阶段所有 Agent 的产出摘要。
-
-    用于下游 Agent 了解上游产出（如 Art-Design 需要知道 Director 的拆解结果）。
-    """
+    """获取某个阶段所有 Agent 的产出摘要。"""
     state = load_state(project)
     sessions = state.get("sessions", {})
 
@@ -250,10 +208,7 @@ def get_phase_context(project: str, phase: str) -> str:
 
 
 def get_full_output(project: str, agent: str) -> str:
-    """获取某 Agent 最新一次完整产出（key_output）。
-
-    用于需要完整内容的场景（如 Director 拆解后 Art-Design 需要完整拆解文本）。
-    """
+    """获取某 Agent 最新一次完整产出（key_output）。"""
     session = get_latest_session(project, agent)
     if not session:
         return ""

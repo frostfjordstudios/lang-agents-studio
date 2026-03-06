@@ -1,31 +1,28 @@
 """多机器人架构模块 (Multi-Bot Architecture)
 
-设计目标：每个 Agent 对应一个独立的飞书应用/机器人，
+每个 Agent 对应一个独立的飞书应用/机器人，
 在群聊中以各自身份发送消息，增强沉浸感。
-
-当前实现：单机器人模式（所有消息通过同一个 bot 发送，
-但消息中带有 Agent 身份标识）。
-
-后续扩展：配置多个飞书应用的 AppID/AppSecret，
-每个 Agent 使用对应的 Client 发送消息。
 
 环境变量格式（多机器人模式）：
   FEISHU_BOT_WRITER_APP_ID=cli_xxx
   FEISHU_BOT_WRITER_APP_SECRET=xxx
-  FEISHU_BOT_DIRECTOR_APP_ID=cli_xxx
-  FEISHU_BOT_DIRECTOR_APP_SECRET=xxx
   ... 以此类推
 """
 
 import os
+import json
 import logging
 from typing import Optional
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 import lark_oapi as lark
+from lark_oapi.api.im.v1 import (
+    CreateMessageRequest,
+    CreateMessageRequestBody,
+)
 
-load_dotenv()  # 确保 .env 在凭证加载前已读取
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +30,14 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BotConfig:
     """单个机器人的配置。"""
-    agent_name: str         # Agent 名称 (writer, director, etc.)
-    display_name: str       # 显示名称
-    emoji: str              # 身份标识 emoji
-    app_id: str = ""        # 飞书 App ID（空则使用默认 bot）
-    app_secret: str = ""    # 飞书 App Secret
+    agent_name: str
+    display_name: str
+    emoji: str
+    app_id: str = ""
+    app_secret: str = ""
 
 
-# ── Agent → Bot 映射配置 ────────────────────────────────────────────
+# ── Agent -> Bot 映射配置 ────────────────────────────────────────────
 
 AGENT_BOTS: dict[str, BotConfig] = {
     "showrunner": BotConfig("showrunner", "总管", "🎯"),
@@ -83,11 +80,7 @@ _bot_clients: dict[str, lark.Client] = {}
 
 
 def get_bot_client(agent_name: str) -> Optional[lark.Client]:
-    """获取指定 Agent 的飞书 Client。
-
-    如果该 Agent 配置了独立的 AppID/AppSecret，返回独立 Client；
-    否则返回 None（调用方应回退到默认 Client）。
-    """
+    """获取指定 Agent 的飞书 Client。"""
     config = AGENT_BOTS.get(agent_name)
     if not config or not config.app_id or not config.app_secret:
         return None
@@ -105,11 +98,7 @@ def get_bot_client(agent_name: str) -> Optional[lark.Client]:
 
 
 def get_agent_prefix(agent_name: str) -> str:
-    """获取 Agent 的消息前缀（emoji + 名称）。
-
-    用于单机器人模式下标识消息来源。
-    例如: "✍️ Writer | "
-    """
+    """获取 Agent 的消息前缀（emoji + 名称）。"""
     config = AGENT_BOTS.get(agent_name)
     if config:
         return f"{config.emoji} {config.display_name} | "
@@ -128,12 +117,7 @@ def send_as_agent(agent_name: str, chat_id: str, text: str) -> Optional[str]:
     如果该 Agent 有独立 bot，使用独立 bot 发送；
     否则使用默认 bot 发送，消息前加 Agent 身份前缀。
     """
-    import json
-    from lark_oapi.api.im.v1 import (
-        CreateMessageRequest,
-        CreateMessageRequestBody,
-    )
-    from src.tools.feishu_message import send_text, _strip_markdown
+    from .message import send_text, _strip_markdown
 
     client = get_bot_client(agent_name)
 

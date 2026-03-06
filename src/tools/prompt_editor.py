@@ -73,7 +73,7 @@ def write_prompt_file(file_path: str, content: str) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     # 清除 prompt 缓存，确保下次使用新内容
-    from .prompt_manager import clear_cache
+    from src.core.prompt_manager import clear_cache
     clear_cache()
     logger.info("Prompt cache cleared after write: %s", file_path)
     return f"已写入: system_prompts/{file_path} ({len(content)} 字符)"
@@ -100,7 +100,7 @@ def edit_prompt_file(file_path: str, old_text: str, new_text: str) -> str:
     updated = current.replace(old_text, new_text)
     target.write_text(updated, encoding="utf-8")
     # 清除 prompt 缓存，确保下次使用新内容
-    from .prompt_manager import clear_cache
+    from src.core.prompt_manager import clear_cache
     clear_cache()
     logger.info("Prompt cache cleared after edit: %s", file_path)
     return f"已替换 {count} 处: system_prompts/{file_path}"

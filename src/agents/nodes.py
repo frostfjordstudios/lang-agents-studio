@@ -1,9 +1,10 @@
 """Agent 节点模块 - 四阶段工作流的所有节点实现。
 
-Phase 1: Writer → Director剧本审核 → Showrunner审核 → 用户门禁
+Phase 1: Writer -> Director剧本审核 -> Showrunner审核 -> 用户门禁
 Phase 2: Director剧本拆解
-Phase 3: Art+Voice生产 → Director生产审核 → 用户门禁
-Phase 4: Storyboard → Director分镜审核 → Showrunner终审评分
+Phase 3: Art+Voice生产 -> Director生产审核 -> 用户门禁
+Phase 4: Storyboard -> Director分镜审核 -> Showrunner终审评分
+
 """
 
 import logging
@@ -11,7 +12,7 @@ from pathlib import Path
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt import create_react_agent
 
-from .llm_config import (
+from src.core.llm_config import (
     get_creative_llm,
     get_slight_llm,
     get_coder_llm,
@@ -19,21 +20,18 @@ from .llm_config import (
 )
 from .state import GraphState
 from .agent_state import get_agent_context, get_phase_context, get_full_output
-from .tools.search_helper import SEARCH_TOOLS, get_search_tool
-from .tools.prompt_manager import get_agent_prompt, get_skill_prompt, get_prompt
+from src.tools.search_helper import SEARCH_TOOLS, get_search_tool
+from src.core.prompt_manager import get_agent_prompt, get_skill_prompt, get_prompt
 
 logger = logging.getLogger(__name__)
 
-OUTPUT_DIR = Path(__file__).resolve().parent.parent / "projects"
+OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "projects"
 
 
 # ── 工具函数 ────────────────────────────────────────────────────────
 
 def _invoke_with_search(llm, messages):
-    """搜索增强调用：LLM 遇到不熟悉的知识时可自动触发 Tavily 搜索。
-
-    绑定搜索工具后调用，若模型决定搜索则执行并将结果注入上下文再次调用。
-    """
+    """搜索增强调用：LLM 遇到不熟悉的知识时可自动触发 Tavily 搜索。"""
     try:
         llm_with_tools = llm.bind_tools(SEARCH_TOOLS)
         response = llm_with_tools.invoke(messages)
@@ -80,11 +78,7 @@ def _build_multimodal_message(text: str, images: list[str]) -> HumanMessage:
 # ══════════════════════════════════════════════════════════════════════
 
 def node_writer(state: GraphState) -> dict:
-    """Writer（编剧） — ReAct Agent 子图，具备多轮搜索+推理能力。
-
-    使用 create_react_agent 封装，Writer 可自主决定何时搜索互联网资料，
-    支持多轮 推理→搜索→观察→再推理 循环，但对外接口不变。
-    """
+    """Writer（编剧） — ReAct Agent 子图，具备多轮搜索+推理能力。"""
     writer_prompt = get_agent_prompt("writer")
     writer_prompt += (
         "\n\n你拥有联网搜索能力。当你需要查阅真实世界的知识、行业资料、"
@@ -115,17 +109,14 @@ def node_writer(state: GraphState) -> dict:
         feedback_parts.append("请据此修改剧本。")
         user_text += "\n\n" + "\n\n".join(feedback_parts)
 
-    # 构建 ReAct Agent 子图
     llm = get_creative_llm()
     search_tool = get_search_tool()
     writer_agent = create_react_agent(llm, [search_tool], prompt=writer_prompt)
 
-    # 运行子图（内部自动处理多轮 tool call 循环）
     result = writer_agent.invoke(
         {"messages": [_build_multimodal_message(user_text, ref_images)]},
     )
 
-    # 提取最终回复（最后一条 AI 消息）
     final_content = ""
     for msg in reversed(result["messages"]):
         if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content:
@@ -144,7 +135,6 @@ def node_director_script_review(state: GraphState) -> dict:
     director_prompt = get_agent_prompt("director")
     project = _get_project(state)
 
-    # Resumable: 注入导演历史上下文
     history_ctx = get_agent_context(project, "director")
     if history_ctx:
         director_prompt += f"\n\n{history_ctx}"
@@ -173,12 +163,9 @@ def node_director_script_review(state: GraphState) -> dict:
 def node_showrunner_script_review(state: GraphState) -> dict:
     """Showrunner 剧本审核 — 第2-3步：业务审核 + 合规审核。"""
     showrunner_prompt = get_agent_prompt("showrunner")
-    compliance_skill = get_skill_prompt(
-        "compliance-review"
-    )
+    compliance_skill = get_skill_prompt("compliance-review")
     project = _get_project(state)
 
-    # Resumable: 注入制片历史上下文
     history_ctx = get_agent_context(project, "showrunner")
 
     system_content = (
@@ -222,7 +209,6 @@ def node_director_breakdown(state: GraphState) -> dict:
     project = _get_project(state)
     ref_images = state.get("reference_images") or []
 
-    # Resumable: 注入导演历史上下文 + Phase 1 产出
     history_ctx = get_agent_context(project, "director")
     phase1_ctx = get_phase_context(project, "phase_1")
     if history_ctx:
@@ -322,7 +308,6 @@ def node_director_production_review(state: GraphState) -> dict:
     director_prompt = get_agent_prompt("director")
     project = _get_project(state)
 
-    # Resumable: 注入导演历史上下文
     history_ctx = get_agent_context(project, "director")
     if history_ctx:
         director_prompt += f"\n\n{history_ctx}"
@@ -362,9 +347,7 @@ def node_user_gate_production(state: GraphState) -> dict:
 def node_storyboard(state: GraphState) -> dict:
     """Storyboard-Artist — 整合所有材料生成最终分镜提示词。"""
     storyboard_prompt = get_agent_prompt("storyboard")
-    storyboard_skill = get_skill_prompt(
-        "seedance-storyboard"
-    )
+    storyboard_skill = get_skill_prompt("seedance-storyboard")
 
     system_content = (
         f"{storyboard_prompt}\n\n"
@@ -401,16 +384,11 @@ def node_director_storyboard_review(state: GraphState) -> dict:
     director_prompt = get_agent_prompt("director")
     project = _get_project(state)
 
-    # Resumable: 注入导演全流程历史
     history_ctx = get_agent_context(project, "director")
     if history_ctx:
         director_prompt += f"\n\n{history_ctx}"
-    review_skill = get_skill_prompt(
-        "seedance-prompt-review"
-    )
-    scoring_skill = get_skill_prompt(
-        "production-scoring"
-    )
+    review_skill = get_skill_prompt("seedance-prompt-review")
+    scoring_skill = get_skill_prompt("production-scoring")
 
     system_content = (
         f"{director_prompt}\n\n"
@@ -499,69 +477,38 @@ def _score_as_agent(
 
 
 def node_scoring_director(state: GraphState) -> dict:
-    """导演评分 — 含交叉验证（各 Agent 产出是否忠实于拆解指令）。"""
     extra = (
         "额外要求：请同时执行导演交叉验证，核查美术/声音/分镜的产出"
         "是否忠实于你最初的导演拆解指令。如有偏差请指出原始指令 vs 实际产出。"
         "\n\n--- Director 分镜审核报告 ---\n"
         f"{state.get('director_storyboard_review', '')}"
     )
-    result = _score_as_agent(
-        state, "director",
-        "director",
-        get_slight_llm,
-        extra,
-    )
+    result = _score_as_agent(state, "director", "director", get_slight_llm, extra)
     return {"scoring_director": result, "current_node": "scoring_director"}
 
 
 def node_scoring_writer(state: GraphState) -> dict:
-    """编剧评分 — 叙事/节奏/动作链 权重高。"""
-    result = _score_as_agent(
-        state, "writer",
-        "writer",
-        get_creative_llm,
-    )
+    result = _score_as_agent(state, "writer", "writer", get_creative_llm)
     return {"scoring_writer": result, "current_node": "scoring_writer"}
 
 
 def node_scoring_art(state: GraphState) -> dict:
-    """美术评分 — 画面感/光影 权重高。"""
-    result = _score_as_agent(
-        state, "art_design",
-        "art_design",
-        get_creative_llm,
-    )
+    result = _score_as_agent(state, "art_design", "art_design", get_creative_llm)
     return {"scoring_art": result, "current_node": "scoring_art"}
 
 
 def node_scoring_voice(state: GraphState) -> dict:
-    """声音评分 — 声音维度 权重高。"""
-    result = _score_as_agent(
-        state, "voice_design",
-        "voice_design",
-        get_creative_llm,
-    )
+    result = _score_as_agent(state, "voice_design", "voice_design", get_creative_llm)
     return {"scoring_voice": result, "current_node": "scoring_voice"}
 
 
 def node_scoring_storyboard(state: GraphState) -> dict:
-    """分镜师评分 — 衔接/镜头/动作链 权重高。"""
-    result = _score_as_agent(
-        state, "storyboard",
-        "storyboard",
-        get_coder_llm,
-    )
+    result = _score_as_agent(state, "storyboard", "storyboard", get_coder_llm)
     return {"scoring_storyboard": result, "current_node": "scoring_storyboard"}
 
 
 def node_scoring_showrunner(state: GraphState) -> dict:
-    """制片评分 — 叙事/商业/衔接 权重高。"""
-    result = _score_as_agent(
-        state, "showrunner",
-        "showrunner",
-        get_strict_llm,
-    )
+    result = _score_as_agent(state, "showrunner", "showrunner", get_strict_llm)
     return {"scoring_showrunner": result, "current_node": "scoring_showrunner"}
 
 

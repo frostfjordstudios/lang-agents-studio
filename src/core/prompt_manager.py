@@ -8,6 +8,10 @@
   get_skill_prompt("art-design")   -> skills/art-design-skill/art-design-skill.md
   get_prompt("agents", "director", "director.md")  -> 任意路径组合
 
+安全读写：
+  safe_read_md(file_path)   -> 绝对安全的 MD 文件读取（errors='replace'）
+  safe_write_md(file_path, content) -> 安全写入
+
 缓存失效：
   调用 clear_cache() 可手动清除缓存（管家修改 prompt 文件后需要触发）。
 """
@@ -22,6 +26,31 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SYSTEM_PROMPTS_DIR = BASE_DIR / "system_prompts"
 
 
+# ── 绝对安全的文件读写 ────────────────────────────────────────────────
+
+def safe_read_md(file_path: str) -> str:
+    """绝对安全的 MD 文件读取，任何异常都不会崩溃。"""
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except Exception as e:
+        logger.error("safe_read_md failed: %s — %s", file_path, e)
+        return f"读取失败: {e}"
+
+
+def safe_write_md(file_path: str, content: str) -> bool:
+    """安全写入 MD 文件，失败返回 False。"""
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return True
+    except Exception as e:
+        logger.error("safe_write_md failed: %s — %s", file_path, e)
+        return False
+
+
+# ── Prompt 加载（带缓存） ─────────────────────────────────────────────
+
 @lru_cache(maxsize=None)
 def get_prompt(*path_parts: str) -> str:
     """通用加载：按路径片段拼接并缓存。
@@ -33,7 +62,7 @@ def get_prompt(*path_parts: str) -> str:
     filepath = SYSTEM_PROMPTS_DIR.joinpath(*path_parts)
     if not filepath.exists():
         raise FileNotFoundError(f"System Prompt not found: {filepath}")
-    content = filepath.read_text(encoding="utf-8", errors="replace")
+    content = safe_read_md(str(filepath))
     logger.debug("Loaded prompt into cache: %s (%d chars)", filepath.name, len(content))
     return content
 

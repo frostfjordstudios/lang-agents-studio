@@ -32,14 +32,14 @@ from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 from fastapi import FastAPI
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from src.graph import build_graph
-from src.llm_config import get_housekeeper_llm, get_strict_llm
-from src.tools.feishu_integration import (
+from src.agents.graph import build_graph
+from src.core.llm_config import get_housekeeper_llm, get_strict_llm
+from src.services.lark.drive import (
     read_all_from_folder,
     read_feishu_docx,
     list_folder_files,
 )
-from src.tools.feishu_message import (
+from src.services.lark.message import (
     send_text,
     reply_text,
     download_message_image,
@@ -47,13 +47,13 @@ from src.tools.feishu_message import (
     image_bytes_to_base64,
 )
 from src.tools.doc_extract import extract_text, get_supported_extensions
-from src.tools.multi_bot import send_as_agent, AGENT_BOTS
+from src.services.lark.multi_bot import send_as_agent, AGENT_BOTS
 from src.tools.search_helper import SEARCH_TOOLS, get_search_tool
 from src.tools.prompt_editor import PROMPT_EDITOR_TOOLS
 from src.tools.chat_helper import generate_work_reply, generate_idle_replies, _extract_text
-from src.tools.prompt_manager import get_agent_prompt, get_skill_prompt, preload_all, clear_cache as clear_prompt_cache
+from src.core.prompt_manager import get_agent_prompt, get_skill_prompt, preload_all, clear_cache as clear_prompt_cache
 from langgraph.prebuilt import create_react_agent
-from src.agent_state import (
+from src.agents.agent_state import (
     begin_session,
     finish_session,
     fail_session,
@@ -460,7 +460,7 @@ def _run_art_feedback(
     storyboard: str,
 ):
     """Use LLM to compare generated art against design spec and refine storyboard."""
-    from src.nodes import _build_multimodal_message
+    from src.agents.nodes import _build_multimodal_message
 
     prompt = (
         "你是一位资深的美术总监和视觉效果评审专家。\n\n"
@@ -778,11 +778,43 @@ def _run_workflow(chat_id: str, thread_id: str, user_request: str):
         else:
             _thread_state[thread_id]["status"] = "finished"
             logger.info("Workflow finished (thread=%s)", thread_id)
+            # 工作流结束：提取最终产出发送给用户
+            _send_final_output(chat_id, config)
 
+    except GeneratorExit:
+        logger.warning("Workflow GeneratorExit (thread=%s) — stream interrupted", thread_id)
+        _thread_state[thread_id]["status"] = "error"
+        send_text(chat_id, "⚠️ 工作流被中断，请重新发送需求。")
     except Exception as e:
         logger.error("Workflow error (thread=%s): %s", thread_id, e, exc_info=True)
         _thread_state[thread_id]["status"] = "error"
-        send_text(chat_id, f"❌ 工作流执行出错: {e}")
+        send_text(chat_id, f"❌ 工作流执行出错: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _send_final_output(chat_id: str, config: dict):
+    """工作流结束后，提取关键产出发送给用户。"""
+    try:
+        final_state = graph_app.get_state(config).values or {}
+
+        # 发送最终分镜提示词
+        storyboard = final_state.get("final_storyboard", "")
+        if storyboard:
+            # 截断超长内容
+            if len(storyboard) > 25000:
+                storyboard = storyboard[:25000] + "\n\n... (内容过长，已截断。完整版已保存到 projects/ 目录)"
+            send_text(chat_id, f"📐 最终分镜提示词\n\n{storyboard}")
+
+        # 发送评分汇总
+        report = final_state.get("final_scoring_report", "")
+        if report:
+            if len(report) > 10000:
+                report = report[:10000] + "\n\n... (已截断)"
+            send_as_agent("showrunner", chat_id, f"📊 评分汇总报告\n\n{report}")
+
+        send_as_agent("housekeeper", chat_id, "🎉 全部完成！所有产出物已保存到 projects/ 目录～")
+    except Exception as e:
+        logger.error("Failed to send final output: %s", e)
+        send_text(chat_id, "✅ 工作流已完成，但发送结果时出错。产出物已保存到 projects/ 目录。")
 
 
 def _resume_workflow(chat_id: str, thread_id: str, user_feedback: str):
@@ -842,11 +874,16 @@ def _resume_workflow(chat_id: str, thread_id: str, user_feedback: str):
         else:
             _thread_state[thread_id]["status"] = "finished"
             logger.info("Workflow finished (thread=%s)", thread_id)
+            _send_final_output(chat_id, config)
 
+    except GeneratorExit:
+        logger.warning("Resume GeneratorExit (thread=%s)", thread_id)
+        _thread_state[thread_id]["status"] = "error"
+        send_text(chat_id, "⚠️ 工作流被中断，请重新发送需求。")
     except Exception as e:
         logger.error("Resume workflow error (thread=%s): %s", thread_id, e, exc_info=True)
         _thread_state[thread_id]["status"] = "error"
-        send_text(chat_id, f"❌ 工作流恢复出错: {e}")
+        send_text(chat_id, f"❌ 工作流恢复出错: {type(e).__name__}: {str(e)[:200]}")
 
 
 # ── Image/File message handlers ──────────────────────────────────────
@@ -1045,7 +1082,7 @@ def _handle_agent_chat(agent_name: str, chat_id: str, message_id: str, text: str
 
         from langchain.agents import AgentExecutor, create_tool_calling_agent
         from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-        from src.llm_config import get_creative_llm, get_slight_llm, get_coder_llm
+        from src.core.llm_config import get_creative_llm, get_slight_llm, get_coder_llm
 
         # Use the LLM matching the agent's role
         _agent_llm_map = {

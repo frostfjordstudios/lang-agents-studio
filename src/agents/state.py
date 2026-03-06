@@ -1,10 +1,10 @@
 """LangGraph 状态定义 - 定义整个工作流的共享状态
 
 工作流四阶段:
-  Phase 1: 剧本创作 (Writer → Director审核 → Showrunner审核 → 用户审核)
+  Phase 1: 剧本创作 (Writer -> Director审核 -> Showrunner审核 -> 用户审核)
   Phase 2: 导演拆解 (Director 将剧本拆解为各部门的制作指令)
-  Phase 3: 内容生产 (Art + Voice 基于导演拆解产出 → Director审核 → 用户审核)
-  Phase 4: 分镜提示词 (Storyboard → Director审核打分 → Showrunner终审评分)
+  Phase 3: 内容生产 (Art + Voice 基于导演拆解产出 -> Director审核 -> 用户审核)
+  Phase 4: 分镜提示词 (Storyboard -> Director审核打分 -> Showrunner终审评分)
 """
 
 from typing import TypedDict

@@ -10,6 +10,7 @@
 """
 
 import io
+import re
 import json
 import base64
 import logging
@@ -33,27 +34,26 @@ from lark_oapi.api.im.v1 import (
     GetMessageResourceResponse,
 )
 
-from .feishu_integration import _get_client
+from .client import get_client
 
 logger = logging.getLogger(__name__)
 
 
 def _strip_markdown(text: str) -> str:
     """移除 Markdown 格式符号，保留纯文本。"""
-    import re
-    # **bold** / __bold__ → bold
+    # **bold** / __bold__ -> bold
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
     text = re.sub(r'__(.+?)__', r'\1', text)
-    # *italic* / _italic_ → italic
+    # *italic* / _italic_ -> italic
     text = re.sub(r'\*(.+?)\*', r'\1', text)
     text = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'\1', text)
-    # ~~strikethrough~~ → strikethrough
+    # ~~strikethrough~~ -> strikethrough
     text = re.sub(r'~~(.+?)~~', r'\1', text)
-    # `code` → code
+    # `code` -> code
     text = re.sub(r'`(.+?)`', r'\1', text)
-    # [text](url) → text
+    # [text](url) -> text
     text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text)
-    # ### headings → headings
+    # ### headings -> headings
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
     return text
 
@@ -61,18 +61,9 @@ def _strip_markdown(text: str) -> str:
 # ── 发送文本消息 ──────────────────────────────────────────────────────
 
 def send_text(chat_id: str, text: str) -> Optional[str]:
-    """发送文本消息到指定群聊。
+    """发送文本消息到指定群聊。"""
+    client = get_client()
 
-    Args:
-        chat_id: 群聊 ID（chat_id）
-        text: 消息文本（支持 emoji）
-
-    Returns:
-        message_id（成功时），None（失败时）
-    """
-    client = _get_client()
-
-    # Feishu text messages: clean markdown, ensure non-empty, truncate if too long
     if not text or not isinstance(text, str):
         text = "(空消息)"
     text = _strip_markdown(text)
@@ -107,16 +98,8 @@ def send_text(chat_id: str, text: str) -> Optional[str]:
 
 
 def reply_text(message_id: str, text: str) -> Optional[str]:
-    """回复指定消息。
-
-    Args:
-        message_id: 要回复的消息 ID
-        text: 回复文本
-
-    Returns:
-        新消息的 message_id（成功时），None（失败时）
-    """
-    client = _get_client()
+    """回复指定消息。"""
+    client = get_client()
 
     if not text or not isinstance(text, str):
         text = "(空消息)"
@@ -152,19 +135,9 @@ def send_image_bytes(
     image_bytes: bytes,
     image_type: str = "message",
 ) -> Optional[str]:
-    """上传图片到飞书并发送到群聊。
+    """上传图片到飞书并发送到群聊。"""
+    client = get_client()
 
-    Args:
-        chat_id: 群聊 ID
-        image_bytes: 图片二进制数据
-        image_type: 图片类型（message / avatar）
-
-    Returns:
-        message_id（成功时），None（失败时）
-    """
-    client = _get_client()
-
-    # 1. 上传图片获取 image_key
     upload_body = CreateImageRequestBody.builder() \
         .image_type(image_type) \
         .image(io.BytesIO(image_bytes)) \
@@ -186,7 +159,6 @@ def send_image_bytes(
     image_key = upload_response.data.image_key
     logger.info("图片已上传: image_key=%s", image_key)
 
-    # 2. 发送图片消息
     body = CreateMessageRequestBody.builder() \
         .receive_id(chat_id) \
         .msg_type("image") \
@@ -220,20 +192,9 @@ def send_file(
     file_name: str,
     file_type: str = "stream",
 ) -> Optional[str]:
-    """上传文件到飞书并发送到群聊。
+    """上传文件到飞书并发送到群聊。"""
+    client = get_client()
 
-    Args:
-        chat_id: 群聊 ID
-        file_bytes: 文件二进制数据
-        file_name: 文件名
-        file_type: 文件类型（opus/mp4/pdf/doc/xls/ppt/stream）
-
-    Returns:
-        message_id（成功时），None（失败时）
-    """
-    client = _get_client()
-
-    # 1. 上传文件获取 file_key
     upload_body = CreateFileRequestBody.builder() \
         .file_type(file_type) \
         .file_name(file_name) \
@@ -256,7 +217,6 @@ def send_file(
     file_key = upload_response.data.file_key
     logger.info("文件已上传: file_key=%s, name=%s", file_key, file_name)
 
-    # 2. 发送文件消息
     body = CreateMessageRequestBody.builder() \
         .receive_id(chat_id) \
         .msg_type("file") \
@@ -285,16 +245,8 @@ def send_file(
 # ── 下载消息中的资源 ──────────────────────────────────────────────────
 
 def download_message_image(message_id: str, image_key: str) -> Optional[bytes]:
-    """下载消息中的图片。
-
-    Args:
-        message_id: 消息 ID
-        image_key: 图片 key（从消息 content 中解析）
-
-    Returns:
-        图片二进制数据，失败返回 None
-    """
-    client = _get_client()
+    """下载消息中的图片。"""
+    client = get_client()
 
     request = GetMessageResourceRequest.builder() \
         .message_id(message_id) \
@@ -317,16 +269,8 @@ def download_message_image(message_id: str, image_key: str) -> Optional[bytes]:
 
 
 def download_message_file(message_id: str, file_key: str) -> Optional[tuple[bytes, str]]:
-    """下载消息中的文件。
-
-    Args:
-        message_id: 消息 ID
-        file_key: 文件 key
-
-    Returns:
-        (文件二进制数据, 文件名) 元组，失败返回 None
-    """
-    client = _get_client()
+    """下载消息中的文件。"""
+    client = get_client()
 
     request = GetMessageResourceRequest.builder() \
         .message_id(message_id) \

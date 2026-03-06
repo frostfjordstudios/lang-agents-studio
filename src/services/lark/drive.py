@@ -1,4 +1,4 @@
-"""Feishu Integration - 飞书云盘、文档、媒体统一工具模块
+"""飞书云盘、文档、媒体工具模块
 
 提供：
   - list_folder_files(folder_token): 列出文件夹下所有文件
@@ -7,7 +7,6 @@
   - read_all_from_folder(folder_token): 一键读取文件夹下所有 Docx 文本 + 图片
 """
 
-import os
 import base64
 import logging
 from typing import Optional
@@ -24,6 +23,8 @@ from lark_oapi.api.docx.v1 import (
     ListDocumentBlockResponse,
 )
 
+from .client import get_client
+
 logger = logging.getLogger(__name__)
 
 # 图片文件扩展名集合（用于按文件名判断类型）
@@ -34,34 +35,11 @@ _BLOCK_TYPE_IMAGE = 27
 _TEXT_BLOCK_TYPES = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
 
 
-# ── 飞书 Client ──────────────────────────────────────────────────────
-
-def _get_client() -> lark.Client:
-    """构建飞书 SDK Client（延迟创建，每次调用时读取环境变量）。"""
-    app_id = os.environ.get("FEISHU_APP_ID", "")
-    app_secret = os.environ.get("FEISHU_APP_SECRET", "")
-    if not app_id or not app_secret:
-        raise ValueError("FEISHU_APP_ID 或 FEISHU_APP_SECRET 未设置")
-    return lark.Client.builder() \
-        .app_id(app_id) \
-        .app_secret(app_secret) \
-        .log_level(lark.LogLevel.INFO) \
-        .build()
-
-
 # ── Drive 文件列表 ───────────────────────────────────────────────────
 
 def list_folder_files(folder_token: str) -> list[dict]:
-    """列出飞书云盘指定文件夹下的所有文件。
-
-    Args:
-        folder_token: 飞书文件夹 Token
-
-    Returns:
-        文件信息列表，每个元素包含 token, name, type 字段。
-        type 值: "doc"/"docx"/"sheet"/"file"/"folder" 等
-    """
-    client = _get_client()
+    """列出飞书云盘指定文件夹下的所有文件。"""
+    client = get_client()
     files = []
     page_token: Optional[str] = None
 
@@ -108,18 +86,8 @@ def download_media_as_base64(
     file_token: str,
     mime_type: str = "image/jpeg",
 ) -> str:
-    """下载飞书云盘媒体文件并转换为 Base64 Data URI。
-
-    兼容独立图片文件和 Docx 内部的图片 Block（通过 media token 下载）。
-
-    Args:
-        file_token: 文件/媒体 Token
-        mime_type: MIME 类型，默认 image/jpeg
-
-    Returns:
-        Base64 Data URI，格式: data:{mime_type};base64,{encoded_data}
-    """
-    client = _get_client()
+    """下载飞书云盘媒体文件并转换为 Base64 Data URI。"""
+    client = get_client()
 
     request = DownloadMediaRequest.builder() \
         .file_token(file_token) \
@@ -169,17 +137,8 @@ def _extract_text_from_block(block) -> str:
 
 
 def read_feishu_docx(document_id: str) -> dict:
-    """读取飞书 Docx 文档，返回结构化的图文混排内容。
-
-    Args:
-        document_id: 飞书文档 ID
-
-    Returns:
-        {"text": str, "images": list[str]}
-        text: 文档全部文本拼接
-        images: 所有图片的 Base64 Data URI 列表
-    """
-    client = _get_client()
+    """读取飞书 Docx 文档，返回结构化的图文混排内容。"""
+    client = get_client()
     all_blocks = []
     page_token: Optional[str] = None
 
@@ -246,7 +205,7 @@ def read_feishu_docx(document_id: str) -> dict:
     }
 
 
-# ── 一键读取文件夹（终极复合函数） ──────────────────────────────────
+# ── 一键读取文件夹 ──────────────────────────────────────────────────
 
 def _guess_mime_type(filename: str) -> str:
     """根据文件名推断 MIME 类型。"""
@@ -263,22 +222,7 @@ def _guess_mime_type(filename: str) -> str:
 
 
 def read_all_from_folder(folder_token: str) -> dict:
-    """一键读取飞书文件夹下的所有 Docx 文本和图片资源。
-
-    遍历文件夹内的每个文件：
-    - docx 类型: 解析全部文本内容和内嵌图片
-    - 图片文件 (png/jpg/...): 直接下载为 Base64
-    - 其他类型: 跳过并记录日志
-
-    Args:
-        folder_token: 飞书文件夹 Token
-
-    Returns:
-        {
-            "text_content": str,      # 所有 Docx 文本合并（文档间用分隔线隔开）
-            "image_list": list[str],  # 所有图片的 Base64 Data URI 列表
-        }
-    """
+    """一键读取飞书文件夹下的所有 Docx 文本和图片资源。"""
     files = list_folder_files(folder_token)
 
     all_texts = []
@@ -289,7 +233,6 @@ def read_all_from_folder(folder_token: str) -> dict:
         name = file_info["name"]
         file_type = file_info["type"]
 
-        # Docx 文档
         if file_type == "docx":
             try:
                 result = read_feishu_docx(token)
@@ -300,7 +243,6 @@ def read_all_from_folder(folder_token: str) -> dict:
             except Exception as e:
                 logger.warning("Failed to read docx %s: %s", name, e)
 
-        # 独立图片文件（type 为 "file" 且扩展名是图片格式）
         elif file_type == "file" and any(name.lower().endswith(ext) for ext in _IMAGE_EXTENSIONS):
             try:
                 mime = _guess_mime_type(name)
