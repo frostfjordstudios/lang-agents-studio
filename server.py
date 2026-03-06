@@ -62,7 +62,21 @@ from src.agent_state import (
     list_sessions,
 )
 
-logging.basicConfig(level=logging.INFO)
+# ── 日志配置 ──────────────────────────────────────────────────────────
+# Terminal 只显示 WARNING 以上；文件记录 INFO 全量日志
+_log_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
+
+_console = logging.StreamHandler()
+_console.setLevel(logging.WARNING)
+_console.setFormatter(_log_fmt)
+
+_log_dir = Path(__file__).resolve().parent / "logs"
+_log_dir.mkdir(exist_ok=True)
+_file_handler = logging.FileHandler(_log_dir / "server.log", encoding="utf-8")
+_file_handler.setLevel(logging.INFO)
+_file_handler.setFormatter(_log_fmt)
+
+logging.basicConfig(level=logging.INFO, handlers=[_console, _file_handler])
 logger = logging.getLogger(__name__)
 
 # ── Paths ──────────────────────────────────────────────────────────────
@@ -612,43 +626,35 @@ def _handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str
             "\n当用户表达创作需求时，在回复末尾加 [ACTION:START_WORKFLOW] 启动工作流。"
         )
 
-        # Build conversation history for the agent
+        # Build conversation history as proper message list
         if thread_id not in _housekeeper_history:
             _housekeeper_history[thread_id] = []
         history = _housekeeper_history[thread_id]
 
-        # Combine history into user message context
-        history_text = ""
-        if history:
-            recent = history[-_HOUSEKEEPER_MAX_HISTORY:]
-            parts = []
-            for msg in recent:
-                role = "用户" if isinstance(msg, HumanMessage) else "管家"
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                parts.append(f"{role}: {content[:500]}")
-            history_text = "\n\n[对话历史]\n" + "\n".join(parts) + "\n\n[当前消息]\n"
-
-        user_input = history_text + text
+        # Construct messages: history + current user message
+        from langchain_core.messages import AIMessage
+        recent = history[-_HOUSEKEEPER_MAX_HISTORY:]
+        messages = list(recent) + [HumanMessage(content=text)]
 
         # Build ReAct Agent with search + prompt editor tools
         llm = get_housekeeper_llm()
         tools = [get_search_tool()] + PROMPT_EDITOR_TOOLS
         housekeeper_agent = create_react_agent(llm, tools, prompt=prompt)
 
-        result = housekeeper_agent.invoke({"messages": [HumanMessage(content=user_input)]})
+        result = housekeeper_agent.invoke({"messages": messages})
 
-        # Extract final reply
+        # Extract final reply (skip tool call messages)
         reply_content = ""
         for msg in reversed(result["messages"]):
-            if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content:
+            if hasattr(msg, "content") and msg.content:
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 if not hasattr(msg, "tool_calls") or not msg.tool_calls:
-                    reply_content = msg.content
+                    reply_content = content
                     break
 
         logger.info("Housekeeper reply (len=%d): %s", len(reply_content), reply_content[:100])
 
-        # Save to history (simplified — store as HumanMessage/AIMessage pairs)
-        from langchain_core.messages import AIMessage
+        # Save to history (only raw user text + clean AI reply, no tool messages)
         history.append(HumanMessage(content=text))
         history.append(AIMessage(content=reply_content))
         if len(history) > _HOUSEKEEPER_MAX_HISTORY * 2:

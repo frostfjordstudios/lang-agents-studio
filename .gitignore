@@ -18,6 +18,12 @@ data/
 *.sqlite3
 *.db
 
+# Logs
+logs/
+
+# Agent state
+.agent-state.json
+
 # OS
 .DS_Store
 
