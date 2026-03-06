@@ -1,11 +1,13 @@
-"""飞书消息分发器 — 解析消息类型并路由到对应处理器
+"""飞书消息分发器 — 管家单点对话 + 命令处理 + 工作流控制
 
 职责：
-  - 解析飞书事件中的消息类型、@mention、命令
-  - 路由到 commands / messages / agent_chat / workflow
-  - 所有业务逻辑在下游处理器中，此处仅做分发
+  - 处理图片/文件素材消息
+  - 处理命令和工作流恢复
+  - @提及时提供引用回显（测试用）
+  - 所有自由文本默认交给 housekeeper
 """
 
+import os
 import re
 import json
 import time
@@ -15,10 +17,8 @@ import threading
 
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
-from src.tools.lark.msg.messaging import send_text
-from src.tools.lark.msg.multi_bot import send_as_agent
+from src.tools.lark.msg.messaging import send_text, reply_text
 from src.tools.lark.commands import (
-    ensure_thread_refs,
     handle_read_folder,
     handle_read_doc,
     handle_stop,
@@ -31,12 +31,13 @@ from src.tools.lark.msg.msg_handlers import (
     handle_image_message,
     handle_file_message,
     parse_mentions,
-    MENTION_NAME_MAP,
 )
-from src.agents.management.chat import handle_agent_chat, handle_housekeeper
+from src.tools.lark.msg.text_utils import clean_text_content, build_mention_echo
+from src.agents.management.chat import handle_housekeeper
 from src.workflow.runner import run_workflow, resume_workflow
 
 logger = logging.getLogger(__name__)
+MENTION_ECHO_ONLY = os.environ.get("FEISHU_MENTION_ECHO_ONLY", "1").strip().lower() in ("1", "true", "yes")
 
 # ── 命令正则 ─────────────────────────────────────────────────────────
 
@@ -55,7 +56,6 @@ _CMD_STATUS = re.compile(r"^[@/]status\s*$", re.IGNORECASE)
 _CMD_HELP = re.compile(r"^[@/]help\s*$", re.IGNORECASE)
 _CMD_REVIEW_ART = re.compile(r"^[@/]review_art\s*$", re.IGNORECASE)
 _CMD_ARCHIVE = re.compile(r"^[@/]archive\s*([a-zA-Z0-9]*)\s*$", re.IGNORECASE)
-_TEXT_AT_AGENT = re.compile(r"^@(\S+)\s*(.*)", re.DOTALL)
 
 
 def _spawn(target, *args):
@@ -133,39 +133,18 @@ class Dispatcher:
                 return
 
             text = content.get("text", "").strip()
-            clean_text = re.sub(r"@_user_\d+", "", text).strip()
+            clean_text = clean_text_content(text)
             if not clean_text and not is_at_all:
-                return
-
-            # ── @所有人 ──
-            if is_at_all:
-                refs = ensure_thread_refs(self.thread_refs, thread_id)
-                if clean_text:
-                    refs["text"] += ("\n\n" if refs["text"] else "") + f"[全员通知] {clean_text}"
-                send_as_agent("housekeeper", chat_id, "收到👌")
-                return
-
-            # ── 飞书 @mention ──
-            if mentioned_agents:
-                _spawn(handle_agent_chat, mentioned_agents[0], chat_id, message_id,
-                       clean_text, thread_id, self.thread_refs, self.thread_state,
-                       self._on_start_workflow)
                 return
 
             # ── 命令 ──
             if self._dispatch_command(clean_text, chat_id, thread_id, message_id):
                 return
 
-            # ── 文本 @agent ──
-            at_match = _TEXT_AT_AGENT.match(clean_text)
-            if at_match:
-                at_name = at_match.group(1).lower().strip()
-                at_body = at_match.group(2).strip()
-                agent = MENTION_NAME_MAP.get(at_name)
-                if agent:
-                    _spawn(handle_agent_chat, agent, chat_id, message_id,
-                           at_body or "你好", thread_id, self.thread_refs,
-                           self.thread_state, self._on_start_workflow)
+            # ── 飞书 @mention（测试回显） ──
+            if mentioned_agents or is_at_all:
+                reply_text(message_id, build_mention_echo(clean_text))
+                if MENTION_ECHO_ONLY:
                     return
 
             # ── 工作流恢复 ──

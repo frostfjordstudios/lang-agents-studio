@@ -6,7 +6,7 @@
   - handle_agent_chat: 通用 Agent 对话（带搜索能力）
 """
 
-import random
+import os
 import logging
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
@@ -17,12 +17,13 @@ from src.tools.lark.msg.multi_bot import send_as_agent
 from src.services.ai.search import SEARCH_TOOLS, get_search_tool
 from src.services.dev.prompt_editor import PROMPT_EDITOR_TOOLS
 from src.services.dev.evolution import EVOLUTION_TOOLS
-from src.agents.persona import generate_idle_replies, _extract_text
+from src.agents.persona import _extract_text
 from src.agents.agent_state import get_agent_context
 from src.core.long_term_memory import add_memory, retrieve_memory
 from langgraph.prebuilt import create_react_agent
 
 logger = logging.getLogger(__name__)
+TEST_MODE = os.environ.get("TEST_MODE", "").strip().lower() in ("1", "true", "yes")
 
 # 对话历史上限
 _MAX_HISTORY = 20
@@ -57,6 +58,15 @@ def handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str,
                        on_start_workflow=None):
     """管家 ReAct Agent 对话。"""
     try:
+        if TEST_MODE:
+            trigger_words = ("创作", "剧本", "分镜", "开始", "启动", "workflow")
+            if on_start_workflow and any(w in text for w in trigger_words):
+                send_as_agent("housekeeper", chat_id, "【测试模式】已收到创作需求，准备启动工作流。")
+                on_start_workflow(chat_id, thread_id, text)
+            else:
+                send_as_agent("housekeeper", chat_id, f"【测试模式】收到你发送的消息：{text}")
+            return
+
         # 检测"记住"指令，存入长期记忆
         _REMEMBER_PREFIXES = ("记住", "记住：", "记住:", "remember", "remember:")
         text_lower = text.strip().lower()
@@ -130,17 +140,6 @@ def handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str,
                 on_start_workflow(chat_id, thread_id, text)
         else:
             send_as_agent("housekeeper", chat_id, reply_content)
-
-            # 空闲闲聊：随机 1-2 个 Agent 也参与
-            status = thread_state.get(thread_id, {}).get("status", "idle")
-            if status in ("idle", "finished", "error", "stopped"):
-                try:
-                    count = random.randint(1, 2)
-                    idle_replies = generate_idle_replies(text, count=count)
-                    for role, idle_text in idle_replies:
-                        send_as_agent(role, chat_id, idle_text)
-                except Exception as idle_err:
-                    logger.warning("Idle chat failed: %s", idle_err, exc_info=True)
 
     except Exception as e:
         logger.error("Housekeeper error: %s", e, exc_info=True)

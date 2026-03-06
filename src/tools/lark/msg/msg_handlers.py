@@ -43,7 +43,8 @@ def parse_mentions(message) -> tuple[list[str], bool]:
     if not mentions:
         return mentioned_agents, is_at_all
 
-    for mention in mentions:
+    raw_mentions = getattr(mentions, "items", mentions)
+    for mention in raw_mentions:
         if isinstance(mention, dict):
             name = mention.get("name", "").lower().strip()
             m_id = mention.get("id", {})

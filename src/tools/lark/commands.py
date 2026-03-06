@@ -121,8 +121,8 @@ def handle_help(chat_id: str):
         "@archive [folder_token]　归档产出到飞书云文档\n\n"
         "📣 对话\n"
         "　　直接说话 → 管家接待\n"
-        "　　@编剧/导演/美术/声音/分镜/制片 → 对应成员回复\n"
-        "　　@所有人 → 管家代收\n\n"
+        "　　@机器人 + 文本 → 引用回显测试\n"
+        "　　其他 Agent 仅发布任务状态更新\n\n"
         "💡 发图片/文件自动存入素材\n"
         "💡 支持 PDF, PPTX, DOCX, XLSX, TXT 等"
     ))
@@ -144,10 +144,15 @@ def handle_archive(chat_id: str, thread_id: str, folder_token: str, graph_app):
         send_text(chat_id, "⚠️ 工作流尚未产出内容，无法归档。")
         return
 
+    resolved_folder_token = (folder_token or os.environ.get("FEISHU_ARCHIVE_FOLDER_TOKEN", "")).strip()
+    if not resolved_folder_token:
+        send_as_agent("housekeeper", chat_id, "⚠️ 未配置归档文件夹 token，请设置 FEISHU_ARCHIVE_FOLDER_TOKEN。")
+        return
+
     send_as_agent("housekeeper", chat_id, "📦 正在归档到飞书云文档...")
 
     try:
-        doc_url = export_state_to_docx(state_values, folder_token=folder_token or None)
+        doc_url = export_state_to_docx(state_values, folder_token=resolved_folder_token)
         if doc_url:
             send_as_agent("housekeeper", chat_id, f"✅ 归档完成！\n\n📄 文档链接: {doc_url}")
         else:
