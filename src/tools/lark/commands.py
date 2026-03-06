@@ -228,7 +228,7 @@ def _run_art_feedback(chat_id: str, thread_id: str, images: list[str],
     if isinstance(raw, str):
         reply = raw
     elif isinstance(raw, list):
-        reply = "".join(
+        reply = "\n".join(
             part.get("text", "") if isinstance(part, dict) else str(part)
             for part in raw
         )

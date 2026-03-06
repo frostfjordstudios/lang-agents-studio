@@ -7,6 +7,7 @@ Phase 4: Storyboard -> Director分镜审核 -> Showrunner终审评分
 
 """
 
+import os
 import logging
 from pathlib import Path
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
@@ -24,8 +25,40 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent.parent / "projects"
 
+# ── 测试模式（TEST_MODE=1 时 LLM 只回几个字，用于链路测试）────────
+TEST_MODE = os.environ.get("TEST_MODE", "").strip() in ("1", "true", "yes")
+
+_TEST_PROMPTS = {
+    "writer": "用一句话写个10字以内的剧本概念。只回一句话。",
+    "director_script_review": "回复：✅ 全部通过。评分9/10。不要多说。",
+    "showrunner_script_review": "回复：✅ 全部通过。合规无问题。不要多说。",
+    "director_breakdown": "用一句话写个10字以内的拆解指令。只回一句话。",
+    "art_design": "用一句话写个10字以内的美术风格。只回一句话。",
+    "voice_design": "用一句话写个10字以内的声音风格。只回一句话。",
+    "director_production_review": "回复：✅ 全部通过。不要多说。",
+    "storyboard": "用一句话写个10字以内的分镜。只回一句话。",
+    "director_storyboard_review": "回复：✅ 全部通过。七维均8+。不要多说。",
+    "scoring": "回复：总分8.5。不要多说。",
+    "scoring_summary": "回复：加权总分8.5/10，达标。不要多说。",
+}
+
 
 # ── 工具函数 ────────────────────────────────────────────────────────
+
+def _extract_text(content) -> str:
+    """从 LLM 响应的 content 中提取纯文本，去除 extras/signature 等元数据。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(item.get("text", ""))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(parts)
+    return str(content)
+
 
 def _invoke_with_search(llm, messages):
     """搜索增强调用：LLM 遇到不熟悉的知识时可自动触发 Tavily 搜索。"""
@@ -57,6 +90,14 @@ def _save_output(project_name: str, episode: int, subdir: str, filename: str, co
     return str(filepath)
 
 
+def _test_call(node_key: str) -> str:
+    """TEST_MODE 下真实调用 LLM，但只用极短 prompt，省 token。"""
+    prompt = _TEST_PROMPTS.get(node_key, "回复：OK。不要多说。")
+    llm = get_llm("director")  # 用最便宜的同一个实例
+    response = llm.invoke([HumanMessage(content=prompt)])
+    return _extract_text(response.content)
+
+
 def _get_project(state: GraphState) -> str:
     return state.get("project_name") or "default_project"
 
@@ -76,6 +117,8 @@ def _build_multimodal_message(text: str, images: list[str]) -> HumanMessage:
 
 def node_writer(state: GraphState) -> dict:
     """Writer（编剧） — ReAct Agent 子图，具备多轮搜索+推理能力。"""
+    if TEST_MODE:
+        return {"current_script": _test_call("writer"), "current_node": "writer"}
     # 上下文压缩：裁剪 Writer 阶段不需要的字段，压缩超长审核记录
     slim = compress_state_context(state, current_phase="writer")
 
@@ -133,6 +176,9 @@ def node_writer(state: GraphState) -> dict:
 
 def node_director_script_review(state: GraphState) -> dict:
     """Director 剧本审核 — 第1步：专业审核 + 打分。"""
+    if TEST_MODE:
+        count = state.get("script_review_count", 0) + 1
+        return {"director_script_review": _test_call("director_script_review"), "script_review_count": count, "current_node": "director_script_review"}
     slim = compress_state_context(state, current_phase="director_script_review")
 
     director_prompt = get_agent_prompt("director")
@@ -157,7 +203,7 @@ def node_director_script_review(state: GraphState) -> dict:
     count = state.get("script_review_count", 0) + 1
 
     return {
-        "director_script_review": response.content,
+        "director_script_review": _extract_text(response.content),
         "script_review_count": count,
         "current_node": "director_script_review",
     }
@@ -165,6 +211,8 @@ def node_director_script_review(state: GraphState) -> dict:
 
 def node_showrunner_script_review(state: GraphState) -> dict:
     """Showrunner 剧本审核 — 第2-3步：业务审核 + 合规审核。"""
+    if TEST_MODE:
+        return {"showrunner_script_review": _test_call("showrunner_script_review"), "current_node": "showrunner_script_review"}
     slim = compress_state_context(state, current_phase="showrunner_script_review")
 
     showrunner_prompt = get_agent_prompt("showrunner")
@@ -194,7 +242,7 @@ def node_showrunner_script_review(state: GraphState) -> dict:
     response = _invoke_with_search(llm, compress_messages(messages))
 
     return {
-        "showrunner_script_review": response.content,
+        "showrunner_script_review": _extract_text(response.content),
         "current_node": "showrunner_script_review",
     }
 
@@ -210,6 +258,8 @@ def node_user_gate_script(state: GraphState) -> dict:
 
 def node_director_breakdown(state: GraphState) -> dict:
     """Director 剧本拆解 — 将剧本转化为各部门制作指令。"""
+    if TEST_MODE:
+        return {"director_breakdown": _test_call("director_breakdown"), "current_node": "director_breakdown"}
     director_prompt = get_agent_prompt("director")
     project = _get_project(state)
     ref_images = state.get("reference_images") or []
@@ -239,7 +289,7 @@ def node_director_breakdown(state: GraphState) -> dict:
     response = _invoke_with_search(llm, messages)
 
     return {
-        "director_breakdown": response.content,
+        "director_breakdown": _extract_text(response.content),
         "current_node": "director_breakdown",
     }
 
@@ -250,6 +300,8 @@ def node_director_breakdown(state: GraphState) -> dict:
 
 def node_art_design(state: GraphState) -> dict:
     """Art-Design — ReAct Agent，具备搜索+网页浏览能力。"""
+    if TEST_MODE:
+        return {"art_design_content": _test_call("art_design"), "current_node": "art_design"}
     art_prompt = get_agent_prompt("art_design")
     art_skill = get_skill_prompt("art-design")
     ref_images = state.get("reference_images") or []
@@ -294,6 +346,8 @@ def node_art_design(state: GraphState) -> dict:
 
 def node_voice_design(state: GraphState) -> dict:
     """Voice-Design — 基于导演拆解的声音指令生成声音方案。"""
+    if TEST_MODE:
+        return {"voice_design_content": _test_call("voice_design"), "current_node": "voice_design"}
     voice_prompt = get_agent_prompt("voice_design")
 
     user_text = (
@@ -314,13 +368,16 @@ def node_voice_design(state: GraphState) -> dict:
     response = _invoke_with_search(llm, messages)
 
     return {
-        "voice_design_content": response.content,
+        "voice_design_content": _extract_text(response.content),
         "current_node": "voice_design",
     }
 
 
 def node_director_production_review(state: GraphState) -> dict:
     """Director 生产审核 — 审核 Art + Voice 产出是否忠实于拆解指令。"""
+    if TEST_MODE:
+        count = state.get("production_review_count", 0) + 1
+        return {"director_production_review": _test_call("director_production_review"), "production_review_count": count, "current_node": "director_production_review"}
     slim = compress_state_context(state, current_phase="director_production_review")
 
     director_prompt = get_agent_prompt("director")
@@ -347,7 +404,7 @@ def node_director_production_review(state: GraphState) -> dict:
     count = state.get("production_review_count", 0) + 1
 
     return {
-        "director_production_review": response.content,
+        "director_production_review": _extract_text(response.content),
         "production_review_count": count,
         "current_node": "director_production_review",
     }
@@ -364,6 +421,8 @@ def node_user_gate_production(state: GraphState) -> dict:
 
 def node_storyboard(state: GraphState) -> dict:
     """Storyboard-Artist — 整合所有材料生成最终分镜提示词。"""
+    if TEST_MODE:
+        return {"final_storyboard": _test_call("storyboard"), "current_node": "storyboard"}
     slim = compress_state_context(state, current_phase="storyboard")
 
     storyboard_prompt = get_agent_prompt("storyboard")
@@ -394,13 +453,16 @@ def node_storyboard(state: GraphState) -> dict:
     response = _invoke_with_search(llm, compress_messages(messages))
 
     return {
-        "final_storyboard": response.content,
+        "final_storyboard": _extract_text(response.content),
         "current_node": "storyboard",
     }
 
 
 def node_director_storyboard_review(state: GraphState) -> dict:
     """Director 分镜终审 — 七维打分 + 问题定位。"""
+    if TEST_MODE:
+        count = state.get("storyboard_review_count", 0) + 1
+        return {"director_storyboard_review": _test_call("director_storyboard_review"), "storyboard_review_count": count, "current_node": "director_storyboard_review"}
     slim = compress_state_context(state, current_phase="director_storyboard_review")
 
     director_prompt = get_agent_prompt("director")
@@ -436,7 +498,7 @@ def node_director_storyboard_review(state: GraphState) -> dict:
     count = state.get("storyboard_review_count", 0) + 1
 
     return {
-        "director_storyboard_review": response.content,
+        "director_storyboard_review": _extract_text(response.content),
         "storyboard_review_count": count,
         "current_node": "director_storyboard_review",
     }
@@ -464,6 +526,8 @@ def _score_as_agent(
     extra_instruction: str = "",
 ) -> str:
     """通用单 Agent 评分函数。"""
+    if TEST_MODE:
+        return _test_call("scoring")
     agent_prompt = get_agent_prompt(role_name)
     scoring_skill = get_skill_prompt("production-scoring")
 
@@ -494,7 +558,7 @@ def _score_as_agent(
 
     llm = get_llm(role_name)
     response = _invoke_with_search(llm, messages)
-    return response.content
+    return _extract_text(response.content)
 
 
 def node_scoring_director(state: GraphState) -> dict:
@@ -535,6 +599,8 @@ def node_scoring_showrunner(state: GraphState) -> dict:
 
 def node_scoring_summary(state: GraphState) -> dict:
     """Showrunner 汇总所有角色评分，计算加权均分，生成最终报告。"""
+    if TEST_MODE:
+        return {"final_scoring_report": _test_call("scoring_summary"), "current_node": "scoring_summary"}
     showrunner_prompt = get_agent_prompt("showrunner")
     scoring_skill = get_skill_prompt("production-scoring")
 
@@ -570,6 +636,6 @@ def node_scoring_summary(state: GraphState) -> dict:
     response = _invoke_with_search(llm, messages)
 
     return {
-        "final_scoring_report": response.content,
+        "final_scoring_report": _extract_text(response.content),
         "current_node": "scoring_summary",
     }

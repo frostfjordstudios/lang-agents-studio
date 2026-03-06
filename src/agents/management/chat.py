@@ -191,7 +191,7 @@ def handle_showrunner(chat_id: str, message_id: str, text: str, thread_id: str,
         if isinstance(raw, str):
             reply_content = raw
         elif isinstance(raw, list):
-            reply_content = "".join(
+            reply_content = "\n".join(
                 part.get("text", "") if isinstance(part, dict) else str(part)
                 for part in raw
             )

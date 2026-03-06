@@ -32,8 +32,16 @@ def _get_memory():
 
     host = os.environ.get("QDRANT_HOST", "localhost")
     port = int(os.environ.get("QDRANT_PORT", "6333"))
+    gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY", "")
 
     config = {
+        "embedder": {
+            "provider": "google",
+            "config": {
+                "model": "models/text-embedding-004",
+                "api_key": gemini_key,
+            },
+        },
         "vector_store": {
             "provider": "qdrant",
             "config": {

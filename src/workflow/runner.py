@@ -109,6 +109,14 @@ def track_node(project: str, node_name: str, node_output: dict, input_summary: s
         return
 
     key_output = node_output.get(output_field, "")
+    # 防御：Gemini 可能返回 list 格式的 content
+    if isinstance(key_output, list):
+        key_output = "\n".join(
+            item.get("text", "") if isinstance(item, dict) else str(item)
+            for item in key_output
+        )
+    elif not isinstance(key_output, str):
+        key_output = str(key_output) if key_output else ""
     summary = key_output[:300] if key_output else "(no output)"
 
     try:
@@ -143,7 +151,12 @@ def format_node_message(node_name: str, node_output: dict, state_values: dict) -
     output_field = NODE_OUTPUT_FIELD.get(node_name, "")
     key_output = node_output.get(output_field, "") if output_field else ""
     if key_output:
-        if not isinstance(key_output, str):
+        if isinstance(key_output, list):
+            key_output = "\n".join(
+                item.get("text", "") if isinstance(item, dict) else str(item)
+                for item in key_output
+            )
+        elif not isinstance(key_output, str):
             key_output = str(key_output)
         excerpt = key_output[:200] + ("..." if len(key_output) > 200 else "")
         situation += f"。产出摘要：{excerpt}"
