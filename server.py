@@ -50,7 +50,7 @@ from src.tools.doc_extract import extract_text, get_supported_extensions
 from src.tools.multi_bot import send_as_agent, AGENT_BOTS
 from src.tools.search_helper import SEARCH_TOOLS, get_search_tool
 from src.tools.prompt_editor import PROMPT_EDITOR_TOOLS
-from src.tools.chat_helper import generate_dynamic_reply, generate_idle_replies
+from src.tools.chat_helper import generate_dynamic_reply, generate_idle_replies, _extract_text
 from src.tools.prompt_manager import get_agent_prompt, get_skill_prompt, preload_all, clear_cache as clear_prompt_cache
 from langgraph.prebuilt import create_react_agent
 from src.agent_state import (
@@ -647,9 +647,8 @@ def _handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str
         reply_content = ""
         for msg in reversed(result["messages"]):
             if hasattr(msg, "content") and msg.content:
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 if not hasattr(msg, "tool_calls") or not msg.tool_calls:
-                    reply_content = content
+                    reply_content = _extract_text(msg.content)
                     break
 
         logger.info("Housekeeper reply (len=%d): %s", len(reply_content), reply_content[:100])
