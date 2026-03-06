@@ -8,7 +8,8 @@ Phase 4: Storyboard → Director分镜审核 → Showrunner终审评分
 
 import logging
 from pathlib import Path
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langgraph.prebuilt import create_react_agent
 
 from .llm_config import (
     get_creative_llm,
@@ -18,25 +19,39 @@ from .llm_config import (
 )
 from .state import GraphState
 from .agent_state import get_agent_context, get_phase_context, get_full_output
+from .tools.search_helper import SEARCH_TOOLS, get_search_tool
+from .tools.prompt_manager import get_agent_prompt, get_skill_prompt, get_prompt
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-SYSTEM_PROMPTS_DIR = BASE_DIR / "system_prompts"
-OUTPUT_DIR = BASE_DIR / "projects"
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / "projects"
 
 
 # ── 工具函数 ────────────────────────────────────────────────────────
 
-def _load_prompt(*path_parts: str) -> str:
-    filepath = SYSTEM_PROMPTS_DIR.joinpath(*path_parts)
-    if not filepath.exists():
-        raise FileNotFoundError(f"System Prompt 文件不存在: {filepath}")
-    return filepath.read_text(encoding="utf-8")
+def _invoke_with_search(llm, messages):
+    """搜索增强调用：LLM 遇到不熟悉的知识时可自动触发 Tavily 搜索。
 
+    绑定搜索工具后调用，若模型决定搜索则执行并将结果注入上下文再次调用。
+    """
+    try:
+        llm_with_tools = llm.bind_tools(SEARCH_TOOLS)
+        response = llm_with_tools.invoke(messages)
 
-def _load_skill(*path_parts: str) -> str:
-    return _load_prompt("skills", *path_parts)
+        if response.tool_calls:
+            messages_with_tools = list(messages) + [response]
+            search_tool = SEARCH_TOOLS[0]
+            for tool_call in response.tool_calls:
+                result = search_tool.invoke(tool_call["args"])
+                messages_with_tools.append(
+                    ToolMessage(content=str(result), tool_call_id=tool_call["id"])
+                )
+            response = llm_with_tools.invoke(messages_with_tools)
+
+        return response
+    except Exception as e:
+        logger.warning("Search-enhanced invoke failed, falling back: %s", e)
+        return llm.invoke(messages)
 
 
 def _save_output(project_name: str, episode: int, subdir: str, filename: str, content: str) -> str:
@@ -65,8 +80,18 @@ def _build_multimodal_message(text: str, images: list[str]) -> HumanMessage:
 # ══════════════════════════════════════════════════════════════════════
 
 def node_writer(state: GraphState) -> dict:
-    """Writer（编剧） — 根据用户需求生成剧本。"""
-    writer_prompt = _load_prompt("agents", "writer", "writer.md")
+    """Writer（编剧） — ReAct Agent 子图，具备多轮搜索+推理能力。
+
+    使用 create_react_agent 封装，Writer 可自主决定何时搜索互联网资料，
+    支持多轮 推理→搜索→观察→再推理 循环，但对外接口不变。
+    """
+    writer_prompt = get_agent_prompt("writer")
+    writer_prompt += (
+        "\n\n你拥有联网搜索能力。当你需要查阅真实世界的知识、行业资料、"
+        "历史背景、技术细节等信息时，请主动使用搜索工具。"
+        "搜索完成后，将搜索结果融入你的创作中。"
+    )
+
     ref_images = state.get("reference_images") or []
     ref_text = state.get("reference_text", "")
 
@@ -75,11 +100,6 @@ def node_writer(state: GraphState) -> dict:
         user_text += f"\n\n--- 参考资料 ---\n{ref_text}"
     if ref_images:
         user_text += "\n\n以下附带了参考图片素材，请在创作中融入图片中的视觉元素和风格特征。"
-
-    messages = [
-        SystemMessage(content=writer_prompt),
-        _build_multimodal_message(user_text, ref_images),
-    ]
 
     # 如果是退回修改，附带之前的审核意见
     director_review = state.get("director_script_review", "")
@@ -93,20 +113,35 @@ def node_writer(state: GraphState) -> dict:
         if user_feedback:
             feedback_parts.append(f"用户反馈：\n{user_feedback}")
         feedback_parts.append("请据此修改剧本。")
-        messages.append(HumanMessage(content="\n\n".join(feedback_parts)))
+        user_text += "\n\n" + "\n\n".join(feedback_parts)
 
+    # 构建 ReAct Agent 子图
     llm = get_creative_llm()
-    response = llm.invoke(messages)
+    search_tool = get_search_tool()
+    writer_agent = create_react_agent(llm, [search_tool], prompt=writer_prompt)
+
+    # 运行子图（内部自动处理多轮 tool call 循环）
+    result = writer_agent.invoke(
+        {"messages": [_build_multimodal_message(user_text, ref_images)]},
+    )
+
+    # 提取最终回复（最后一条 AI 消息）
+    final_content = ""
+    for msg in reversed(result["messages"]):
+        if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content:
+            if not hasattr(msg, "tool_calls") or not msg.tool_calls:
+                final_content = msg.content
+                break
 
     return {
-        "current_script": response.content,
+        "current_script": final_content,
         "current_node": "writer",
     }
 
 
 def node_director_script_review(state: GraphState) -> dict:
     """Director 剧本审核 — 第1步：专业审核 + 打分。"""
-    director_prompt = _load_prompt("agents", "director", "director.md")
+    director_prompt = get_agent_prompt("director")
     project = _get_project(state)
 
     # Resumable: 注入导演历史上下文
@@ -125,7 +160,7 @@ def node_director_script_review(state: GraphState) -> dict:
     ]
 
     llm = get_slight_llm()
-    response = llm.invoke(messages)
+    response = _invoke_with_search(llm, messages)
     count = state.get("script_review_count", 0) + 1
 
     return {
@@ -137,9 +172,9 @@ def node_director_script_review(state: GraphState) -> dict:
 
 def node_showrunner_script_review(state: GraphState) -> dict:
     """Showrunner 剧本审核 — 第2-3步：业务审核 + 合规审核。"""
-    showrunner_prompt = _load_prompt("agents", "showrunner", "showrunner.md")
-    compliance_skill = _load_skill(
-        "compliance-review-skill", "compliance-review-skill.md"
+    showrunner_prompt = get_agent_prompt("showrunner")
+    compliance_skill = get_skill_prompt(
+        "compliance-review"
     )
     project = _get_project(state)
 
@@ -164,7 +199,7 @@ def node_showrunner_script_review(state: GraphState) -> dict:
     ]
 
     llm = get_strict_llm()
-    response = llm.invoke(messages)
+    response = _invoke_with_search(llm, messages)
 
     return {
         "showrunner_script_review": response.content,
@@ -183,7 +218,7 @@ def node_user_gate_script(state: GraphState) -> dict:
 
 def node_director_breakdown(state: GraphState) -> dict:
     """Director 剧本拆解 — 将剧本转化为各部门制作指令。"""
-    director_prompt = _load_prompt("agents", "director", "director.md")
+    director_prompt = get_agent_prompt("director")
     project = _get_project(state)
     ref_images = state.get("reference_images") or []
 
@@ -210,7 +245,7 @@ def node_director_breakdown(state: GraphState) -> dict:
     ]
 
     llm = get_slight_llm()
-    response = llm.invoke(messages)
+    response = _invoke_with_search(llm, messages)
 
     return {
         "director_breakdown": response.content,
@@ -224,8 +259,8 @@ def node_director_breakdown(state: GraphState) -> dict:
 
 def node_art_design(state: GraphState) -> dict:
     """Art-Design — 基于导演拆解的视觉指令生成美术提示词。"""
-    art_prompt = _load_prompt("agents", "art-design", "art-design.md")
-    art_skill = _load_skill("art-design-skill", "art-design-skill.md")
+    art_prompt = get_agent_prompt("art_design")
+    art_skill = get_skill_prompt("art-design")
     ref_images = state.get("reference_images") or []
 
     system_content = f"{art_prompt}\n\n--- 美术设计技能规范 ---\n{art_skill}"
@@ -247,7 +282,7 @@ def node_art_design(state: GraphState) -> dict:
     ]
 
     llm = get_creative_llm()
-    response = llm.invoke(messages)
+    response = _invoke_with_search(llm, messages)
 
     return {
         "art_design_content": response.content,
@@ -257,7 +292,7 @@ def node_art_design(state: GraphState) -> dict:
 
 def node_voice_design(state: GraphState) -> dict:
     """Voice-Design — 基于导演拆解的声音指令生成声音方案。"""
-    voice_prompt = _load_prompt("agents", "voice-design", "voice-design.md")
+    voice_prompt = get_agent_prompt("voice_design")
 
     user_text = (
         f"请根据导演拆解中的声音指令，生成完整的声音设计方案。\n\n"
@@ -274,7 +309,7 @@ def node_voice_design(state: GraphState) -> dict:
     ]
 
     llm = get_creative_llm()
-    response = llm.invoke(messages)
+    response = _invoke_with_search(llm, messages)
 
     return {
         "voice_design_content": response.content,
@@ -284,7 +319,7 @@ def node_voice_design(state: GraphState) -> dict:
 
 def node_director_production_review(state: GraphState) -> dict:
     """Director 生产审核 — 审核 Art + Voice 产出是否忠实于拆解指令。"""
-    director_prompt = _load_prompt("agents", "director", "director.md")
+    director_prompt = get_agent_prompt("director")
     project = _get_project(state)
 
     # Resumable: 注入导演历史上下文
@@ -305,7 +340,7 @@ def node_director_production_review(state: GraphState) -> dict:
     ]
 
     llm = get_slight_llm()
-    response = llm.invoke(messages)
+    response = _invoke_with_search(llm, messages)
     count = state.get("production_review_count", 0) + 1
 
     return {
@@ -326,11 +361,9 @@ def node_user_gate_production(state: GraphState) -> dict:
 
 def node_storyboard(state: GraphState) -> dict:
     """Storyboard-Artist — 整合所有材料生成最终分镜提示词。"""
-    storyboard_prompt = _load_prompt(
-        "agents", "storyboard-artist", "storyboard-artist.md"
-    )
-    storyboard_skill = _load_skill(
-        "seedance-storyboard-skill", "seedance-storyboard-skill.md"
+    storyboard_prompt = get_agent_prompt("storyboard")
+    storyboard_skill = get_skill_prompt(
+        "seedance-storyboard"
     )
 
     system_content = (
@@ -355,7 +388,7 @@ def node_storyboard(state: GraphState) -> dict:
     ]
 
     llm = get_coder_llm()
-    response = llm.invoke(messages)
+    response = _invoke_with_search(llm, messages)
 
     return {
         "final_storyboard": response.content,
@@ -365,18 +398,18 @@ def node_storyboard(state: GraphState) -> dict:
 
 def node_director_storyboard_review(state: GraphState) -> dict:
     """Director 分镜终审 — 七维打分 + 问题定位。"""
-    director_prompt = _load_prompt("agents", "director", "director.md")
+    director_prompt = get_agent_prompt("director")
     project = _get_project(state)
 
     # Resumable: 注入导演全流程历史
     history_ctx = get_agent_context(project, "director")
     if history_ctx:
         director_prompt += f"\n\n{history_ctx}"
-    review_skill = _load_skill(
-        "seedance-prompt-review-skill", "seedance-prompt-review-skill.md"
+    review_skill = get_skill_prompt(
+        "seedance-prompt-review"
     )
-    scoring_skill = _load_skill(
-        "production-scoring-skill", "production-scoring-skill.md"
+    scoring_skill = get_skill_prompt(
+        "production-scoring"
     )
 
     system_content = (
@@ -399,7 +432,7 @@ def node_director_storyboard_review(state: GraphState) -> dict:
     ]
 
     llm = get_slight_llm()
-    response = llm.invoke(messages)
+    response = _invoke_with_search(llm, messages)
     count = state.get("storyboard_review_count", 0) + 1
 
     return {
@@ -427,13 +460,13 @@ def _build_scoring_context(state: GraphState) -> str:
 def _score_as_agent(
     state: GraphState,
     agent_name: str,
-    prompt_path: tuple[str, ...],
+    role_name: str,
     llm_fn,
     extra_instruction: str = "",
 ) -> str:
     """通用单 Agent 评分函数。"""
-    agent_prompt = _load_prompt(*prompt_path)
-    scoring_skill = _load_skill("production-scoring-skill", "production-scoring-skill.md")
+    agent_prompt = get_agent_prompt(role_name)
+    scoring_skill = get_skill_prompt("production-scoring")
 
     system_content = (
         f"{agent_prompt}\n\n"
@@ -461,7 +494,7 @@ def _score_as_agent(
     ]
 
     llm = llm_fn()
-    response = llm.invoke(messages)
+    response = _invoke_with_search(llm, messages)
     return response.content
 
 
@@ -475,7 +508,7 @@ def node_scoring_director(state: GraphState) -> dict:
     )
     result = _score_as_agent(
         state, "director",
-        ("agents", "director", "director.md"),
+        "director",
         get_slight_llm,
         extra,
     )
@@ -486,7 +519,7 @@ def node_scoring_writer(state: GraphState) -> dict:
     """编剧评分 — 叙事/节奏/动作链 权重高。"""
     result = _score_as_agent(
         state, "writer",
-        ("agents", "writer", "writer.md"),
+        "writer",
         get_creative_llm,
     )
     return {"scoring_writer": result, "current_node": "scoring_writer"}
@@ -496,7 +529,7 @@ def node_scoring_art(state: GraphState) -> dict:
     """美术评分 — 画面感/光影 权重高。"""
     result = _score_as_agent(
         state, "art_design",
-        ("agents", "art-design", "art-design.md"),
+        "art_design",
         get_creative_llm,
     )
     return {"scoring_art": result, "current_node": "scoring_art"}
@@ -506,7 +539,7 @@ def node_scoring_voice(state: GraphState) -> dict:
     """声音评分 — 声音维度 权重高。"""
     result = _score_as_agent(
         state, "voice_design",
-        ("agents", "voice-design", "voice-design.md"),
+        "voice_design",
         get_creative_llm,
     )
     return {"scoring_voice": result, "current_node": "scoring_voice"}
@@ -516,7 +549,7 @@ def node_scoring_storyboard(state: GraphState) -> dict:
     """分镜师评分 — 衔接/镜头/动作链 权重高。"""
     result = _score_as_agent(
         state, "storyboard",
-        ("agents", "storyboard-artist", "storyboard-artist.md"),
+        "storyboard",
         get_coder_llm,
     )
     return {"scoring_storyboard": result, "current_node": "scoring_storyboard"}
@@ -526,7 +559,7 @@ def node_scoring_showrunner(state: GraphState) -> dict:
     """制片评分 — 叙事/商业/衔接 权重高。"""
     result = _score_as_agent(
         state, "showrunner",
-        ("agents", "showrunner", "showrunner.md"),
+        "showrunner",
         get_strict_llm,
     )
     return {"scoring_showrunner": result, "current_node": "scoring_showrunner"}
@@ -534,8 +567,8 @@ def node_scoring_showrunner(state: GraphState) -> dict:
 
 def node_scoring_summary(state: GraphState) -> dict:
     """Showrunner 汇总所有角色评分，计算加权均分，生成最终报告。"""
-    showrunner_prompt = _load_prompt("agents", "showrunner", "showrunner.md")
-    scoring_skill = _load_skill("production-scoring-skill", "production-scoring-skill.md")
+    showrunner_prompt = get_agent_prompt("showrunner")
+    scoring_skill = get_skill_prompt("production-scoring")
 
     all_scores = (
         f"--- 🎬 导演评分 ---\n{state.get('scoring_director', '')}\n\n"
@@ -566,7 +599,7 @@ def node_scoring_summary(state: GraphState) -> dict:
     ]
 
     llm = get_strict_llm()
-    response = llm.invoke(messages)
+    response = _invoke_with_search(llm, messages)
 
     return {
         "final_scoring_report": response.content,

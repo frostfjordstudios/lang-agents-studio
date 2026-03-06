@@ -151,6 +151,9 @@ def send_as_agent(agent_name: str, chat_id: str, text: str) -> Optional[str]:
             return None
         return response.data.message_id
     else:
-        # Single-bot mode: add prefix to identify the agent
+        # Single-bot mode: housekeeper IS the main bot, no prefix needed;
+        # other agents add prefix to identify themselves.
+        if agent_name == "housekeeper":
+            return send_text(chat_id, text)
         prefix = get_agent_prefix(agent_name)
         return send_text(chat_id, prefix + text)

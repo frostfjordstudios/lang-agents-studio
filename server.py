@@ -21,6 +21,7 @@ import re
 import json
 import uuid
 import base64
+import random
 import asyncio
 import logging
 import threading
@@ -47,6 +48,11 @@ from src.tools.feishu_message import (
 )
 from src.tools.doc_extract import extract_text, get_supported_extensions
 from src.tools.multi_bot import send_as_agent, AGENT_BOTS
+from src.tools.search_helper import SEARCH_TOOLS, get_search_tool
+from src.tools.prompt_editor import PROMPT_EDITOR_TOOLS
+from src.tools.chat_helper import generate_dynamic_reply, generate_idle_replies
+from src.tools.prompt_manager import get_agent_prompt, get_skill_prompt, preload_all, clear_cache as clear_prompt_cache
+from langgraph.prebuilt import create_react_agent
 from src.agent_state import (
     begin_session,
     finish_session,
@@ -66,6 +72,7 @@ SYSTEM_PROMPTS_DIR = BASE_DIR / "system_prompts"
 
 # ── LangGraph app ─────────────────────────────────────────────────────
 
+preload_all()  # 预加载所有 prompt 到内存，消除运行时磁盘 I/O
 graph_app = build_graph()
 logger.info("LangGraph workflow compiled and ready.")
 
@@ -116,35 +123,58 @@ def _ensure_thread_refs(thread_id: str) -> dict:
 
 
 def _load_housekeeper_prompt() -> str:
-    filepath = SYSTEM_PROMPTS_DIR / "agents" / "housekeeper" / "housekeeper.md"
-    return filepath.read_text(encoding="utf-8")
+    return get_agent_prompt("housekeeper")
 
 
 def _load_showrunner_prompt() -> str:
-    filepath = SYSTEM_PROMPTS_DIR / "agents" / "showrunner" / "showrunner.md"
-    return filepath.read_text(encoding="utf-8")
+    return get_agent_prompt("showrunner")
+
+
+def _invoke_with_search(llm, messages):
+    """Invoke LLM with web search tool capability.
+
+    If the model decides to search, execute the tool call and re-invoke
+    with the search results. Returns the final AIMessage response.
+    """
+    from langchain_core.messages import ToolMessage
+
+    llm_with_tools = llm.bind_tools(SEARCH_TOOLS)
+    response = llm_with_tools.invoke(messages)
+
+    if response.tool_calls:
+        messages_with_tools = list(messages) + [response]
+        search_tool = SEARCH_TOOLS[0]
+        for tool_call in response.tool_calls:
+            result = search_tool.invoke(tool_call["args"])
+            messages_with_tools.append(
+                ToolMessage(content=str(result), tool_call_id=tool_call["id"])
+            )
+        response = llm_with_tools.invoke(messages_with_tools)
+
+    return response
 
 
 # ── Node message templates ────────────────────────────────────────────
 
-_NODE_MESSAGES = {
-    # Phase 1
-    "writer": "✍️ 编剧完成\n\n{summary}\n\n⏳ 进入 Director 审核...",
-    "director_script_review": "🎬 Director 剧本审核完成\n\n{summary}\n\n⏳ 进入 Showrunner 审核...",
-    "showrunner_script_review": "🎯 Showrunner 审核完成\n\n{summary}",
+# 节点 → 场景描述（供 LLM 生成动态回复）
+_NODE_SITUATIONS: dict[str, str] = {
+    "writer": "刚写完剧本初稿，交给导演审核",
+    "director_script_review": "剧本审核完成，交给制片确认",
+    "showrunner_script_review": "制片审核完成，准备交给老板确认",
+    "director_breakdown": "导演拆解完成，运镜/光线/风格/道具/声音指令已生成，进入内容生产",
+    "parallel_production": "美术设计和声音设计都完成了，交给导演审核",
+    "director_production_review": "导演审核完美术和声音设计，准备交给老板确认",
+    "storyboard": "分镜提示词写完了，交给导演终审",
+    "director_storyboard_review": "导演分镜终审完成",
+    "parallel_scoring": "六角色并行评分全部完成，交给制片汇总",
+    "scoring_summary": "多角色加权评分汇总完成",
+    "save_outputs": "所有产出物已保存完毕，可以收工了",
+}
+
+# user_gate 节点仍用结构化模板（需要展示审核详情）
+_USER_GATE_TEMPLATES = {
     "user_gate_script": "🔔 剧本需要你的确认\n\n{summary}\n\n请回复「通过」继续，或发送修改意见。",
-    # Phase 2
-    "director_breakdown": "🎬 导演拆解完成\n\n运镜/光线/风格/人物/道具/声音指令已生成\n\n⏳ 进入内容生产...",
-    # Phase 3
-    "parallel_production": "🎨 美术设计 + 🔊 声音设计 完成\n\n⏳ 进入 Director 审核...",
-    "director_production_review": "🎬 Director 生产审核完成\n\n{summary}",
     "user_gate_production": "🔔 美术+声音需要你的确认\n\n{summary}\n\n请回复「通过」继续，或发送修改意见。",
-    # Phase 4
-    "storyboard": "📐 分镜提示词完成\n\n{summary}\n\n⏳ 进入 Director 终审...",
-    "director_storyboard_review": "🎬 Director 分镜终审完成\n\n{summary}",
-    "parallel_scoring": "📊 六角色并行评分完成\n\n导演/编剧/美术/声音/分镜/制片 已各自完成评分\n\n⏳ 制片汇总中...",
-    "scoring_summary": "🎯 多角色加权评分汇总完成\n\n{summary}",
-    "save_outputs": "📦 所有产出物已保存",
 }
 
 _NODE_TO_AGENT = {
@@ -175,6 +205,23 @@ _NODE_OUTPUT_FIELD = {
     "director_storyboard_review": "director_storyboard_review",
     "parallel_scoring": "scoring_director",
     "scoring_summary": "final_scoring_report",
+}
+
+# 节点 → 开始时哪些 Agent 发"收到👌"（非管家 Agent 接活确认）
+_NODE_ACK_AGENTS: dict[str, list[str]] = {
+    "writer": ["writer"],
+    "director_script_review": ["director"],
+    "showrunner_script_review": ["showrunner"],
+    "user_gate_script": [],
+    "director_breakdown": ["director"],
+    "parallel_production": ["art_design", "voice_design"],
+    "director_production_review": ["director"],
+    "user_gate_production": [],
+    "storyboard": ["storyboard"],
+    "director_storyboard_review": ["director"],
+    "parallel_scoring": ["director", "writer", "art_design", "voice_design", "storyboard", "showrunner"],
+    "scoring_summary": ["showrunner"],
+    "save_outputs": [],
 }
 
 # 节点 → 所属阶段
@@ -210,43 +257,53 @@ def _track_node(project: str, node_name: str, node_output: dict, input_summary: 
 
 
 def _format_node_message(node_name: str, node_output: dict, state_values: dict) -> str:
-    """Format the push message for a completed node."""
-    template = _NODE_MESSAGES.get(node_name)
-    if not template:
+    """Format the push message for a completed node.
+
+    user_gate 节点返回结构化模板（含审核详情），
+    其他节点通过 LLM 生成带人设的动态回复。
+    """
+    # user_gate 节点：仍用结构化模板
+    gate_template = _USER_GATE_TEMPLATES.get(node_name)
+    if gate_template:
+        summary = ""
+        if node_name == "user_gate_script":
+            dr = state_values.get("director_script_review", "")[:400]
+            sr = state_values.get("showrunner_script_review", "")[:400]
+            script_preview = state_values.get("current_script", "")[:300]
+            summary = f"📋 剧本摘要:\n{script_preview}...\n\n🎬 Director:\n{dr}\n\n🎯 Showrunner:\n{sr}"
+        elif node_name == "user_gate_production":
+            review = state_values.get("director_production_review", "")[:500]
+            summary = f"🎬 Director 审核:\n{review}"
+        return gate_template.format(summary=summary)
+
+    # 其他节点：LLM 动态回复
+    situation = _NODE_SITUATIONS.get(node_name)
+    if not situation:
         return ""
 
-    summary = ""
+    agent = _NODE_TO_AGENT.get(node_name, "showrunner")
+
+    # 提取该节点的关键产出摘要，附加到 situation
+    output_field = _NODE_OUTPUT_FIELD.get(node_name, "")
+    key_output = node_output.get(output_field, "") if output_field else ""
+    if key_output:
+        excerpt = key_output[:200] + ("..." if len(key_output) > 200 else "")
+        situation += f"。产出摘要：{excerpt}"
+
+    reply = generate_dynamic_reply(agent, situation)
+
+    # 对于有大段产出的节点，在动态回复后附上关键内容
+    detail = ""
     if node_name == "writer":
         script = node_output.get("current_script", "")
-        summary = script[:800] + ("..." if len(script) > 800 else "")
-    elif node_name == "director_script_review":
-        review = node_output.get("director_script_review", "")
-        summary = review[:600] + ("..." if len(review) > 600 else "")
-    elif node_name == "showrunner_script_review":
-        review = node_output.get("showrunner_script_review", "")
-        summary = review[:600] + ("..." if len(review) > 600 else "")
-    elif node_name == "user_gate_script":
-        dr = state_values.get("director_script_review", "")[:400]
-        sr = state_values.get("showrunner_script_review", "")[:400]
-        script_preview = state_values.get("current_script", "")[:300]
-        summary = f"📋 剧本摘要:\n{script_preview}...\n\n🎬 Director:\n{dr}\n\n🎯 Showrunner:\n{sr}"
-    elif node_name == "director_production_review":
-        review = node_output.get("director_production_review", "")
-        summary = review[:600] + ("..." if len(review) > 600 else "")
-    elif node_name == "user_gate_production":
-        review = state_values.get("director_production_review", "")[:500]
-        summary = f"🎬 Director 审核:\n{review}"
-    elif node_name == "storyboard":
-        sb = node_output.get("final_storyboard", "")
-        summary = sb[:600] + ("..." if len(sb) > 600 else "")
-    elif node_name == "director_storyboard_review":
-        review = node_output.get("director_storyboard_review", "")
-        summary = review[:600] + ("..." if len(review) > 600 else "")
-    elif node_name == "scoring_summary":
+        if script:
+            detail = "\n\n" + script[:800] + ("..." if len(script) > 800 else "")
+    elif node_name in ("scoring_summary",):
         report = node_output.get("final_scoring_report", "")
-        summary = report[:800] + ("..." if len(report) > 800 else "")
+        if report:
+            detail = "\n\n" + report[:800] + ("..." if len(report) > 800 else "")
 
-    return template.format(summary=summary)
+    return reply + detail
 
 
 # ── Command handlers ──────────────────────────────────────────────────
@@ -502,7 +559,7 @@ def _handle_showrunner(chat_id: str, message_id: str, text: str, thread_id: str)
         messages.append(HumanMessage(content=text))
 
         llm = get_strict_llm()
-        response = llm.invoke(messages)
+        response = _invoke_with_search(llm, messages)
 
         raw = response.content
         if isinstance(raw, str):
@@ -540,57 +597,73 @@ def _handle_showrunner(chat_id: str, message_id: str, text: str, thread_id: str)
 # ── Housekeeper Agent ─────────────────────────────────────────────────
 
 def _handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str):
-    """Housekeeper direct conversation (not through LangGraph workflow)."""
+    """Housekeeper — ReAct Agent，具备多轮搜索 + Prompt 文件编辑能力。
+
+    管家可以：
+    - 联网搜索资料（Tavily）
+    - 读取/修改/创建 system_prompts/ 下的 agents 和 skills 文件
+    - 多轮推理→行动→观察循环
+    """
     try:
         prompt = _load_housekeeper_prompt()
-
-        # Maintain conversation history
-        if thread_id not in _housekeeper_history:
-            _housekeeper_history[thread_id] = []
-        history = _housekeeper_history[thread_id]
-
-        # Build messages
-        messages = [SystemMessage(content=prompt)]
 
         # Add context about current state
         refs = _thread_refs.get(thread_id, {"text": "", "images": []})
         state_info = _thread_state.get(thread_id, {})
-        context = (
-            f"[系统上下文] 当前已加载素材: {len(refs['images'])} 张图片, "
+        prompt += (
+            f"\n\n[系统上下文] 当前已加载素材: {len(refs['images'])} 张图片, "
             f"{len(refs['text'])} 字符文本。"
             f"工作流状态: {state_info.get('status', 'idle')}。"
+            "\n\n你拥有以下能力："
+            "\n1. 联网搜索：查找实时信息、行业资料"
+            "\n2. 文件管理：读取、修改、创建 system_prompts/ 下的 agents 和 skills 提示词文件"
+            "\n   - list_prompt_files: 列出目录下的文件"
+            "\n   - read_prompt_file: 读取文件内容"
+            "\n   - write_prompt_file: 创建或覆写文件"
+            "\n   - edit_prompt_file: 精确替换文件中的文本"
+            "\n当用户要求修改 Agent 提示词或创建新 Agent/Skill 时，请主动使用文件工具。"
+            "\n当用户表达创作需求时，在回复末尾加 [ACTION:START_WORKFLOW] 启动工作流。"
         )
-        messages.append(HumanMessage(content=context))
 
-        # Add conversation history
-        for msg in history[-_HOUSEKEEPER_MAX_HISTORY:]:
-            messages.append(msg)
+        # Build conversation history for the agent
+        if thread_id not in _housekeeper_history:
+            _housekeeper_history[thread_id] = []
+        history = _housekeeper_history[thread_id]
 
-        # Add current message
-        messages.append(HumanMessage(content=text))
+        # Combine history into user message context
+        history_text = ""
+        if history:
+            recent = history[-_HOUSEKEEPER_MAX_HISTORY:]
+            parts = []
+            for msg in recent:
+                role = "用户" if isinstance(msg, HumanMessage) else "管家"
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                parts.append(f"{role}: {content[:500]}")
+            history_text = "\n\n[对话历史]\n" + "\n".join(parts) + "\n\n[当前消息]\n"
 
+        user_input = history_text + text
+
+        # Build ReAct Agent with search + prompt editor tools
         llm = get_housekeeper_llm()
-        response = llm.invoke(messages)
+        tools = [get_search_tool()] + PROMPT_EDITOR_TOOLS
+        housekeeper_agent = create_react_agent(llm, tools, prompt=prompt)
 
-        # Extract text: response.content may be str or list of content parts
-        raw = response.content
-        if isinstance(raw, str):
-            reply_content = raw
-        elif isinstance(raw, list):
-            reply_content = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in raw
-            )
-        else:
-            reply_content = str(raw) if raw else ""
+        result = housekeeper_agent.invoke({"messages": [HumanMessage(content=user_input)]})
+
+        # Extract final reply
+        reply_content = ""
+        for msg in reversed(result["messages"]):
+            if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content:
+                if not hasattr(msg, "tool_calls") or not msg.tool_calls:
+                    reply_content = msg.content
+                    break
 
         logger.info("Housekeeper reply (len=%d): %s", len(reply_content), reply_content[:100])
 
-        # Save to history
+        # Save to history (simplified — store as HumanMessage/AIMessage pairs)
+        from langchain_core.messages import AIMessage
         history.append(HumanMessage(content=text))
-        history.append(response)
-
-        # Trim history
+        history.append(AIMessage(content=reply_content))
         if len(history) > _HOUSEKEEPER_MAX_HISTORY * 2:
             _housekeeper_history[thread_id] = history[-_HOUSEKEEPER_MAX_HISTORY:]
 
@@ -602,6 +675,16 @@ def _handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str
             _run_workflow(chat_id, thread_id, text)
         else:
             send_as_agent("housekeeper", chat_id, reply_content)
+
+            # Idle chat: 1-2 random agents also chime in
+            status = _thread_state.get(thread_id, {}).get("status", "idle")
+            if status in ("idle", "finished", "error", "stopped"):
+                try:
+                    idle_replies = generate_idle_replies(text, count=random.randint(1, 2))
+                    for role, idle_text in idle_replies:
+                        send_as_agent(role, chat_id, idle_text)
+                except Exception as idle_err:
+                    logger.warning("Idle chat failed: %s", idle_err)
 
     except Exception as e:
         logger.error("Housekeeper error: %s", e, exc_info=True)
@@ -677,6 +760,10 @@ def _run_workflow(chat_id: str, thread_id: str, user_request: str):
                 # Merge output into accumulated state
                 accumulated_state.update(node_output)
 
+                # Ack: non-housekeeper agents say "收到👌" when receiving task
+                for ack_agent in _NODE_ACK_AGENTS.get(current, []):
+                    send_as_agent(ack_agent, chat_id, "收到👌")
+
                 # Push message for key nodes (as the corresponding agent)
                 msg = _format_node_message(current, node_output, accumulated_state)
                 if msg:
@@ -735,6 +822,10 @@ def _resume_workflow(chat_id: str, thread_id: str, user_feedback: str):
                 current = node_output.get("current_node", node_name)
                 _thread_state[thread_id]["last_node"] = current
                 logger.info("Node completed: %s (thread=%s)", current, thread_id)
+
+                # Ack: non-housekeeper agents say "收到👌" when receiving task
+                for ack_agent in _NODE_ACK_AGENTS.get(current, []):
+                    send_as_agent(ack_agent, chat_id, "收到👌")
 
                 # Get full state for message formatting
                 full_state = graph_app.get_state(config).values
@@ -929,8 +1020,15 @@ def _parse_mentions(message) -> tuple[list[str], bool]:
 # ── 通用 Agent 对话 ─────────────────────────────────────────────────
 
 def _handle_agent_chat(agent_name: str, chat_id: str, message_id: str, text: str, thread_id: str):
-    """Route chat to a specific agent by name. Showrunner/Housekeeper use their
-    dedicated handlers; other agents get a short, work-focused LLM reply."""
+    """Route chat to a specific agent by name.
+
+    All agents have full conversation ability + web search capability.
+    Non-housekeeper agents ack with "收到👌" before responding.
+    """
+    # Ack first (non-housekeeper agents)
+    if agent_name != "housekeeper":
+        send_as_agent(agent_name, chat_id, "收到👌")
+
     if agent_name == "showrunner":
         _handle_showrunner(chat_id, message_id, text, thread_id)
         return
@@ -938,45 +1036,46 @@ def _handle_agent_chat(agent_name: str, chat_id: str, message_id: str, text: str
         _handle_housekeeper(chat_id, message_id, text, thread_id)
         return
 
-    # Other agents: minimal work-focused reply
+    # All other agents: full conversation with search capability
     try:
-        agent_prompt_map = {
-            "writer": "writer/writer.md",
-            "director": "director/director.md",
-            "art_design": "art-design/art-design.md",
-            "voice_design": "voice-design/voice-design.md",
-            "storyboard": "storyboard-artist/storyboard-artist.md",
+        try:
+            sys_prompt = get_agent_prompt(agent_name)
+        except (ValueError, FileNotFoundError):
+            sys_prompt = f"你是{agent_name}。"
+
+        sys_prompt += "\n\n你可以使用搜索工具查找互联网上的信息来辅助回答。请用你的专业身份回复，保持角色特色。"
+
+        from langchain.agents import AgentExecutor, create_tool_calling_agent
+        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+        from src.llm_config import get_creative_llm, get_slight_llm, get_coder_llm
+
+        # Use the LLM matching the agent's role
+        _agent_llm_map = {
+            "writer": get_creative_llm,
+            "art_design": get_creative_llm,
+            "voice_design": get_creative_llm,
+            "director": get_slight_llm,
+            "storyboard": get_coder_llm,
         }
-        prompt_file = agent_prompt_map.get(agent_name)
-        if prompt_file:
-            filepath = SYSTEM_PROMPTS_DIR / "agents" / prompt_file
-            sys_prompt = filepath.read_text(encoding="utf-8")
-        else:
-            sys_prompt = f"你是{agent_name}，简洁回复即可。"
+        llm_factory = _agent_llm_map.get(agent_name, get_creative_llm)
+        llm = llm_factory()
 
-        from src.llm_config import get_creative_llm
-        llm = get_creative_llm()
-        messages = [
-            SystemMessage(content=sys_prompt + "\n\n请简洁回复，控制在两三句话以内，以工作为重。"),
-            HumanMessage(content=text),
-        ]
-        response = llm.invoke(messages)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", sys_prompt),
+            ("human", "{input}"),
+            MessagesPlaceholder("agent_scratchpad"),
+        ])
 
-        raw = response.content
-        if isinstance(raw, str):
-            reply = raw
-        elif isinstance(raw, list):
-            reply = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in raw
-            )
-        else:
-            reply = str(raw) if raw else ""
+        agent = create_tool_calling_agent(llm, SEARCH_TOOLS, prompt)
+        executor = AgentExecutor(agent=agent, tools=SEARCH_TOOLS, verbose=False, max_iterations=3)
+
+        result = executor.invoke({"input": text})
+        reply = result.get("output", "")
 
         send_as_agent(agent_name, chat_id, reply)
     except Exception as e:
         logger.error("Agent %s chat error: %s", agent_name, e, exc_info=True)
-        send_as_agent(agent_name, chat_id, "收到，稍后处理。")
+        send_as_agent(agent_name, chat_id, "抱歉，处理时出了点问题，请稍后再试。")
 
 
 # ── Feishu message handler ────────────────────────────────────────────
