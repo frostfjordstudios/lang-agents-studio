@@ -1,27 +1,27 @@
 """飞书 WebSocket 长连接启动
 
 每个 bot 在独立线程中运行，使用 SDK 自带的 start() 方法，
-内置心跳和自动重连机制，避免共享 event loop 导致的连接问题。
+内置心跳和自动重连机制。
+
+lark SDK 使用模块级 event loop，与 uvicorn 的运行中 loop 冲突，
+通过 nest_asyncio 允许嵌套 run_until_complete 来解决。
 """
 
-import asyncio
 import logging
 import threading
 
+import nest_asyncio
 import lark_oapi as lark
 
 from src.tools.lark.websocket.bot_manager import collect_bot_configs
+
+nest_asyncio.apply()
 
 logger = logging.getLogger(__name__)
 
 
 def _run_bot(app_id: str, app_secret: str, bot_name: str, event_handler):
-    """单个 bot 的 WebSocket 运行循环。
-
-    为每个线程创建独立的 event loop，避免与主线程（uvicorn）的 loop 冲突。
-    """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    """单个 bot 的 WebSocket 运行循环。"""
     cli = lark.ws.Client(
         app_id, app_secret,
         event_handler=event_handler,
