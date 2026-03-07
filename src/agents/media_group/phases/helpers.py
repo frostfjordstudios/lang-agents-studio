@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "projects"
 
-TEST_MODE = os.environ.get("TEST_MODE", "").strip() in ("1", "true", "yes")
+TEST_MODE = os.environ.get("TEST_MODE", "").strip().lower() in ("1", "true", "yes")
 
 _TEST_PROMPTS = {
     "writer": "用一句话写个10字以内的剧本概念。只回一句话。",

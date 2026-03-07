@@ -37,7 +37,7 @@ from src.agents.management.chat import handle_housekeeper
 from src.workflow.runner import run_workflow, resume_workflow
 
 logger = logging.getLogger(__name__)
-MENTION_ECHO_ONLY = os.environ.get("FEISHU_MENTION_ECHO_ONLY", "1").strip().lower() in ("1", "true", "yes")
+MENTION_ECHO_ONLY = os.environ.get("FEISHU_MENTION_ECHO_ONLY", "0").strip().lower() in ("1", "true", "yes")
 
 # ── 命令正则 ─────────────────────────────────────────────────────────
 

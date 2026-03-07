@@ -24,6 +24,22 @@ from langgraph.prebuilt import create_react_agent
 
 logger = logging.getLogger(__name__)
 TEST_MODE = os.environ.get("TEST_MODE", "").strip().lower() in ("1", "true", "yes")
+TEST_MODE_ALL_AGENTS_SPEAK = os.environ.get("TEST_MODE_ALL_AGENTS_SPEAK", "1").strip().lower() in ("1", "true", "yes")
+_TEST_AGENT_LINES = {
+    "showrunner": "状态：统筹中",
+    "writer": "状态：可开始写稿",
+    "director": "状态：可开始审稿",
+    "art_design": "状态：可开始美术方案",
+    "voice_design": "状态：可开始声音方案",
+    "storyboard": "状态：可开始分镜提示词",
+}
+
+
+def _broadcast_test_mode_updates(chat_id: str, thread_id: str):
+    """In TEST_MODE, let all key agents post very short status lines."""
+    project = f"test_{thread_id[-6:]}" if thread_id else "test_session"
+    for agent, line in _TEST_AGENT_LINES.items():
+        send_as_agent(agent, chat_id, f"项目：{project}\n{line}")
 
 # 对话历史上限
 _MAX_HISTORY = 20
@@ -59,12 +75,29 @@ def handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str,
     """管家 ReAct Agent 对话。"""
     try:
         if TEST_MODE:
-            trigger_words = ("创作", "剧本", "分镜", "开始", "启动", "workflow")
-            if on_start_workflow and any(w in text for w in trigger_words):
-                send_as_agent("housekeeper", chat_id, "【测试模式】已收到创作需求，准备启动工作流。")
-                on_start_workflow(chat_id, thread_id, text)
+            llm = get_llm("housekeeper")
+            short_messages = [
+                SystemMessage(content=(
+                    "你是项目管家。请用1-2句简短回复。"
+                    "如果用户明确表达创作需求（剧本/分镜/创作/启动工作流），"
+                    "在末尾追加 [ACTION:START_WORKFLOW]。"
+                    "除该标记外不要输出多余解释。"
+                )),
+                HumanMessage(content=text),
+            ]
+            short_resp = llm.invoke(short_messages)
+            short_reply = _extract_text(short_resp.content).strip() if short_resp else ""
+            if "[ACTION:START_WORKFLOW]" in short_reply:
+                clean_reply = short_reply.replace("[ACTION:START_WORKFLOW]", "").strip()
+                send_as_agent("housekeeper", chat_id, clean_reply or "收到，准备启动。")
+                if TEST_MODE_ALL_AGENTS_SPEAK:
+                    _broadcast_test_mode_updates(chat_id, thread_id)
+                if on_start_workflow:
+                    on_start_workflow(chat_id, thread_id, text)
             else:
-                send_as_agent("housekeeper", chat_id, f"【测试模式】收到你发送的消息：{text}")
+                send_as_agent("housekeeper", chat_id, short_reply or "收到。")
+                if TEST_MODE_ALL_AGENTS_SPEAK:
+                    _broadcast_test_mode_updates(chat_id, thread_id)
             return
 
         # 检测"记住"指令，存入长期记忆
