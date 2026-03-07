@@ -13,7 +13,7 @@ from pathlib import Path
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from src.core.state import GraphState
+from src.agents.media_group.state import GraphState
 from .nodes import (
     node_writer,
     node_director_script_review,

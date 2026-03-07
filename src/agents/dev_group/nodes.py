@@ -6,10 +6,10 @@ architect: 分析系统结构、使用进化工具执行修改
 import logging
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from src.core.llm_config import get_llm
-from src.core.state import GraphState
-from src.core.registry import get_agent
-from src.services.dev.evolution import EVOLUTION_TOOLS
+from src.tools.llm import get_llm
+from src.agents.media_group.state import GraphState
+from src.agents.organization import get_agent
+from src.agents.dev_group.evolution import EVOLUTION_TOOLS
 
 logger = logging.getLogger(__name__)
 

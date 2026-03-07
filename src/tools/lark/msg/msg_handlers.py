@@ -15,7 +15,7 @@ from src.tools.lark.msg.messaging import (
     download_message_file,
     image_bytes_to_base64,
 )
-from src.tools.lark.commands import ensure_thread_refs
+from src.tools.lark.commands.read_folder import ensure_thread_refs
 from src.tools.lark.docs.doc_extract import extract_text, get_supported_extensions
 
 logger = logging.getLogger(__name__)

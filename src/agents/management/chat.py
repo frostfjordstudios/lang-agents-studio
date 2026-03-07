@@ -1,78 +1,37 @@
-"""Agent 对话服务 — 管家、制片、通用 Agent 对话
+"""Agent 对话服务 — 管家默认对话 + @Agent 对话
 
 职责：
   - handle_housekeeper: 管家 ReAct Agent（搜索 + Prompt 编辑 + 进化工具）
-  - handle_showrunner: 制片直接对话（可触发工作流）
-  - handle_agent_chat: 通用 Agent 对话（带搜索能力）
+  - handle_agent_chat: 被 @提及 时，Agent 以自己人设回复
 """
 
 import os
 import logging
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
-from src.core.llm_config import get_llm
-from src.core.prompt_manager import get_agent_prompt
+from src.tools.llm import get_llm, extract_text as _extract_text
+from src.services.prompt.loader import get_agent_prompt
 from src.tools.lark.msg.messaging import send_text
 from src.tools.lark.msg.multi_bot import send_as_agent
-from src.services.ai.search import SEARCH_TOOLS, get_search_tool
-from src.services.dev.prompt_editor import PROMPT_EDITOR_TOOLS
-from src.services.dev.evolution import EVOLUTION_TOOLS
-from src.agents.persona import _extract_text
-from src.agents.agent_state import get_agent_context
-from src.core.long_term_memory import add_memory, retrieve_memory
+from src.tools.search import get_search_tool
+from src.agents.management.housekeeper.prompt_tools import PROMPT_EDITOR_TOOLS
+from src.agents.dev_group.evolution import EVOLUTION_TOOLS
+from src.agents.organization import get_temperature
+from src.services.memory.add import add_memory
+from src.services.memory.retrieve import retrieve_memory
 from langgraph.prebuilt import create_react_agent
 
 logger = logging.getLogger(__name__)
 TEST_MODE = os.environ.get("TEST_MODE", "").strip().lower() in ("1", "true", "yes")
-TEST_MODE_ALL_AGENTS_SPEAK = os.environ.get("TEST_MODE_ALL_AGENTS_SPEAK", "1").strip().lower() in ("1", "true", "yes")
-_TEST_AGENT_LINES = {
-    "showrunner": "状态：统筹中",
-    "writer": "状态：可开始写稿",
-    "director": "状态：可开始审稿",
-    "art_design": "状态：可开始美术方案",
-    "voice_design": "状态：可开始声音方案",
-    "storyboard": "状态：可开始分镜提示词",
-}
 
-
-def _broadcast_test_mode_updates(chat_id: str, thread_id: str):
-    """In TEST_MODE, let all key agents post very short status lines."""
-    project = f"test_{thread_id[-6:]}" if thread_id else "test_session"
-    for agent, line in _TEST_AGENT_LINES.items():
-        send_as_agent(agent, chat_id, f"项目：{project}\n{line}")
-
-# 对话历史上限
 _MAX_HISTORY = 20
-
-# 每个线程的对话历史
 _housekeeper_history: dict[str, list] = {}
-_showrunner_history: dict[str, list] = {}
-
-
-def _invoke_with_search(llm, messages):
-    """LLM + 搜索工具单轮调用。"""
-    from langchain_core.messages import ToolMessage
-
-    llm_with_tools = llm.bind_tools(SEARCH_TOOLS)
-    response = llm_with_tools.invoke(messages)
-
-    if response.tool_calls:
-        messages_with_tools = list(messages) + [response]
-        search_tool = SEARCH_TOOLS[0]
-        for tool_call in response.tool_calls:
-            result = search_tool.invoke(tool_call["args"])
-            messages_with_tools.append(
-                ToolMessage(content=str(result), tool_call_id=tool_call["id"])
-            )
-        response = llm_with_tools.invoke(messages_with_tools)
-
-    return response
 
 
 def handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str,
                        thread_refs: dict, thread_state: dict,
                        on_start_workflow=None):
-    """管家 ReAct Agent 对话。"""
+    """管家 ReAct Agent 对话 — 用户的唯一默认对话入口。"""
     try:
         if TEST_MODE:
             llm = get_llm("housekeeper")
@@ -90,14 +49,10 @@ def handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str,
             if "[ACTION:START_WORKFLOW]" in short_reply:
                 clean_reply = short_reply.replace("[ACTION:START_WORKFLOW]", "").strip()
                 send_as_agent("housekeeper", chat_id, clean_reply or "收到，准备启动。")
-                if TEST_MODE_ALL_AGENTS_SPEAK:
-                    _broadcast_test_mode_updates(chat_id, thread_id)
                 if on_start_workflow:
                     on_start_workflow(chat_id, thread_id, text)
             else:
                 send_as_agent("housekeeper", chat_id, short_reply or "收到。")
-                if TEST_MODE_ALL_AGENTS_SPEAK:
-                    _broadcast_test_mode_updates(chat_id, thread_id)
             return
 
         # 检测"记住"指令，存入长期记忆
@@ -176,122 +131,30 @@ def handle_housekeeper(chat_id: str, message_id: str, text: str, thread_id: str,
 
     except Exception as e:
         logger.error("Housekeeper error: %s", e, exc_info=True)
-        send_text(chat_id, f"❌ 管家暂时无法回复: {e}")
-
-
-def handle_showrunner(chat_id: str, message_id: str, text: str, thread_id: str,
-                      thread_refs: dict, thread_state: dict,
-                      on_start_workflow=None):
-    """制片对话（可触发工作流）。"""
-    try:
-        prompt = get_agent_prompt("showrunner")
-
-        if thread_id not in _showrunner_history:
-            _showrunner_history[thread_id] = []
-        history = _showrunner_history[thread_id]
-
-        messages = [SystemMessage(content=prompt)]
-
-        refs = thread_refs.get(thread_id, {"text": "", "images": []})
-        state_info = thread_state.get(thread_id, {})
-        project = state_info.get("project", f"proj_{thread_id[-8:]}")
-
-        showrunner_ctx = get_agent_context(project, "showrunner")
-
-        context = (
-            f"[系统上下文] 当前已加载素材: {len(refs['images'])} 张图片, "
-            f"{len(refs['text'])} 字符文本。"
-            f"工作流状态: {state_info.get('status', 'idle')}。"
-            f"\n\n"
-            f"你是制片总监 Showrunner，是用户的主要对接人。"
-            f"当用户表达了明确的创作需求（如写剧本、制作短剧等），"
-            f"请在回复末尾加上 [ACTION:START_WORKFLOW] 来启动工作流。"
-            f"如果用户只是在闲聊或提问，正常回复即可，不要加标记。"
-        )
-        if showrunner_ctx:
-            context += f"\n\n{showrunner_ctx}"
-        messages.append(HumanMessage(content=context))
-
-        for msg in history[-_MAX_HISTORY:]:
-            messages.append(msg)
-        messages.append(HumanMessage(content=text))
-
-        llm = get_llm("showrunner")
-        response = _invoke_with_search(llm, messages)
-
-        raw = response.content
-        if isinstance(raw, str):
-            reply_content = raw
-        elif isinstance(raw, list):
-            reply_content = "\n".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in raw
-            )
-        else:
-            reply_content = str(raw) if raw else ""
-
-        history.append(HumanMessage(content=text))
-        history.append(response)
-        if len(history) > _MAX_HISTORY * 2:
-            _showrunner_history[thread_id] = history[-_MAX_HISTORY:]
-
-        if "[ACTION:START_WORKFLOW]" in reply_content:
-            clean_reply = reply_content.replace("[ACTION:START_WORKFLOW]", "").strip()
-            send_as_agent("showrunner", chat_id, clean_reply)
-            if on_start_workflow:
-                on_start_workflow(chat_id, thread_id, text)
-        else:
-            send_as_agent("showrunner", chat_id, reply_content)
-
-    except Exception as e:
-        logger.error("Showrunner error: %s", e, exc_info=True)
-        send_text(chat_id, f"❌ 制片暂时无法回复: {e}")
+        send_text(chat_id, f"管家暂时无法回复: {e}")
 
 
 def handle_agent_chat(agent_name: str, chat_id: str, message_id: str,
-                      text: str, thread_id: str,
-                      thread_refs: dict, thread_state: dict,
-                      on_start_workflow=None):
-    """通用 Agent 对话路由。"""
-    if agent_name != "housekeeper":
-        send_as_agent(agent_name, chat_id, "收到👌")
+                      text: str, thread_id: str):
+    """被 @提及 的 Agent 用自己的 System Prompt 回复用户。
 
-    if agent_name == "showrunner":
-        handle_showrunner(chat_id, message_id, text, thread_id,
-                          thread_refs, thread_state, on_start_workflow)
-        return
-    if agent_name == "housekeeper":
-        handle_housekeeper(chat_id, message_id, text, thread_id,
-                           thread_refs, thread_state, on_start_workflow)
-        return
-
-    # 通用 Agent：搜索 + 角色对话
+    只在用户通过飞书 @功能 指定某个 Agent 时触发。
+    """
     try:
         try:
             sys_prompt = get_agent_prompt(agent_name)
         except (ValueError, FileNotFoundError):
             sys_prompt = f"你是{agent_name}。"
 
-        sys_prompt += "\n\n你可以使用搜索工具查找互联网上的信息来辅助回答。请用你的专业身份回复，保持角色特色。"
+        sys_prompt += "\n\n请用简短的一两句话回应用户，保持你的专业角色特色。"
 
-        from langchain.agents import AgentExecutor, create_tool_calling_agent
-        from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-
-        llm = get_llm(agent_name)
-
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", sys_prompt),
-            ("human", "{input}"),
-            MessagesPlaceholder("agent_scratchpad"),
+        llm = get_llm(temperature=get_temperature(agent_name))
+        response = llm.invoke([
+            SystemMessage(content=sys_prompt),
+            HumanMessage(content=text),
         ])
-
-        agent = create_tool_calling_agent(llm, SEARCH_TOOLS, prompt)
-        executor = AgentExecutor(agent=agent, tools=SEARCH_TOOLS, verbose=False, max_iterations=3)
-
-        result = executor.invoke({"input": text})
-        reply = result.get("output", "")
-        send_as_agent(agent_name, chat_id, reply)
-
+        reply = _extract_text(response.content)
+        send_as_agent(agent_name, chat_id, reply or "收到。")
     except Exception as e:
         logger.error("Agent %s chat error: %s", agent_name, e, exc_info=True)
-        send_as_agent(agent_name, chat_id, "抱歉，处理时出了点问题，请稍后再试。")
+        send_as_agent(agent_name, chat_id, "收到。")

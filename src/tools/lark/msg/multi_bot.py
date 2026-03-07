@@ -24,7 +24,7 @@ from lark_oapi.api.im.v1 import (
     CreateMessageRequestBody,
 )
 
-from src.core.registry import get_all_agents
+from src.agents.organization import get_all_agents
 
 load_dotenv()
 
@@ -102,7 +102,7 @@ def get_agent_prefix(agent_name: str) -> str:
     if config:
         return f"{config.emoji} {config.display_name} | "
     # 回退到 registry（覆盖新增但未重启的 Agent）
-    from src.core.registry import get_display_name
+    from src.agents.organization import get_display_name
     dn = get_display_name(agent_name)
     return f"{dn} | " if dn != agent_name else ""
 

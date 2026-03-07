@@ -2,7 +2,7 @@
 
 import logging
 
-from src.agents.agent_state import begin_session, finish_session
+from src.agents.state.session import begin_session, finish_session
 
 from .constants import NODE_OUTPUT_FIELD, NODE_PHASE, NODE_TO_AGENT
 from .utils import normalize_output_text

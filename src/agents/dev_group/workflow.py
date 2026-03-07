@@ -5,7 +5,7 @@
 
 from langgraph.graph import StateGraph, END
 
-from src.core.state import GraphState
+from src.agents.media_group.state import GraphState
 from .nodes import node_architect
 
 

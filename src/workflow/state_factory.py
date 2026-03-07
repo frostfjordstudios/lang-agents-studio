@@ -1,6 +1,6 @@
 """Workflow state factory helpers."""
 
-from src.core.state import GraphState
+from src.agents.media_group.state import GraphState
 
 
 def default_project_name(thread_id: str | None = None) -> str:
