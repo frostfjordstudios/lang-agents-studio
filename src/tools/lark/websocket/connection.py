@@ -1,34 +1,40 @@
 """飞书 WebSocket 长连接启动
 
 管家 bot 在独立线程中运行。
-通过 importlib 重新加载 lark SDK 的 ws.client 模块，
-让它在新线程的 event loop 上初始化，避免与 uvicorn loop 冲突。
+在线程中先设置新的 event loop，再 import lark SDK 构建 Client，
+确保 SDK 的模块级 loop 变量绑定到线程自己的 loop。
 """
 
 import asyncio
-import importlib
 import logging
 import os
+import sys
 import threading
-
-import lark_oapi as lark
 
 logger = logging.getLogger(__name__)
 
 
-def _run_bot(app_id: str, app_secret: str, bot_name: str, event_handler):
-    """管家 bot 的 WebSocket 运行循环。
-
-    重新加载 lark ws.client 模块，使其模块级 loop 绑定到当前线程的新 loop。
-    """
+def _run_bot(app_id: str, app_secret: str, bot_name: str, dispatcher):
+    """管家 bot 的 WebSocket 运行循环。"""
+    # 1. 创建并设置线程独立的 event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # 重新加载让 SDK 用当前线程的 loop
-    import lark_oapi.ws.client as ws_client
-    importlib.reload(ws_client)
+    # 2. 强制 lark SDK ws 模块重新初始化，绑定到当前线程的 loop
+    import importlib
+    import lark_oapi.ws.client as ws_mod
+    importlib.reload(ws_mod)
 
-    cli = lark.ws.Client(
+    import lark_oapi as lark
+
+    # 3. 用 reload 后的模块创建 Client
+    event_handler = (
+        lark.EventDispatcherHandler.builder("", "")
+        .register_p2_im_message_receive_v1(dispatcher.handle)
+        .build()
+    )
+
+    cli = ws_mod.Client(
         app_id, app_secret,
         event_handler=event_handler,
         log_level=lark.LogLevel.INFO,
@@ -51,15 +57,9 @@ def start_websocket(dispatcher) -> None:
         logger.error("FEISHU_APP_ID/SECRET not set — no WebSocket connection started.")
         return
 
-    event_handler = (
-        lark.EventDispatcherHandler.builder("", "")
-        .register_p2_im_message_receive_v1(dispatcher.handle)
-        .build()
-    )
-
     t = threading.Thread(
         target=_run_bot,
-        args=(main_id, main_secret, "housekeeper", event_handler),
+        args=(main_id, main_secret, "housekeeper", dispatcher),
         daemon=True,
         name="ws-housekeeper",
     )
