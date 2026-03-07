@@ -45,13 +45,15 @@ def send_final_output(graph_app, chat_id: str, config: dict):
             )
 
         try:
-            folder_token = os.environ.get("FEISHU_ARCHIVE_FOLDER_TOKEN", "").strip()
+            from src.tools.lark.docs.permissions import get_department_folder
+            folder_token = (get_department_folder("media_group")
+                            or os.environ.get("FEISHU_ARCHIVE_FOLDER_TOKEN", "").strip())
             if not folder_token:
-                logger.warning("FEISHU_ARCHIVE_FOLDER_TOKEN is empty; skip cloud archive")
+                logger.warning("No department folder or FEISHU_ARCHIVE_FOLDER_TOKEN; skip cloud archive")
                 send_as_agent(
                     "housekeeper",
                     chat_id,
-                    "⚠️ 未配置 FEISHU_ARCHIVE_FOLDER_TOKEN，已跳过飞书云文档归档。",
+                    "⚠️ 未配置部门文件夹，已跳过飞书云文档归档。",
                 )
             else:
                 doc_url = export_state_to_docx(final_state, folder_token)

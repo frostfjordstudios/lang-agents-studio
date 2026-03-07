@@ -34,6 +34,7 @@ from src.tools.lark.msg.msg_handlers import (
 from src.tools.lark.msg.text_utils import clean_text_content
 from src.tools.llm import sanitize_input
 from src.agents.management.housekeeper.chat import handle_housekeeper
+from src.agents.management.housekeeper.test_mode import is_test_mode, set_test_mode
 from src.agents.management.chat import handle_agent_chat
 from src.workflow.runner import run_workflow, resume_workflow
 
@@ -56,6 +57,8 @@ _CMD_STATUS = re.compile(r"^[@/]status\s*$", re.IGNORECASE)
 _CMD_HELP = re.compile(r"^[@/]help\s*$", re.IGNORECASE)
 _CMD_REVIEW_ART = re.compile(r"^[@/]review_art\s*$", re.IGNORECASE)
 _CMD_ARCHIVE = re.compile(r"^[@/]archive\s*([a-zA-Z0-9]*)\s*$", re.IGNORECASE)
+_CMD_TEST = re.compile(r"^[@/]test\s*$", re.IGNORECASE)
+_CMD_WORK = re.compile(r"^[@/]work\s*$", re.IGNORECASE)
 
 
 def _spawn(target, *args):
@@ -75,6 +78,8 @@ class Dispatcher:
         self.art_feedback_images: dict[str, list] = {}
         self._seen_msgs: dict[str, float] = {}
         self._seen_lock = threading.Lock()
+        # 管家静默状态：当其他 Agent 被@时，管家暂停响应，直到用户再@管家
+        self._housekeeper_silenced: dict[str, bool] = {}  # chat_id -> silenced
 
     def _on_start_workflow(self, chat_id: str, thread_id: str, text: str):
         run_workflow(self.graph_app, chat_id, thread_id, text,
@@ -132,13 +137,47 @@ class Dispatcher:
             if self._dispatch_command(clean_text, chat_id, thread_id, message_id):
                 return
 
-            # ── @Agent：让被提及的 Agent 以自己人设回复 ──
-            if mentioned_agents:
-                for agent_name in mentioned_agents:
+            # ── @Agent 路由 ──
+            housekeeper_mentioned = "housekeeper" in mentioned_agents
+            other_agents = [a for a in mentioned_agents if a != "housekeeper"]
+
+            if other_agents:
+                # 有非管家 Agent 被@：让他们回复，管家进入静默
+                self._housekeeper_silenced[chat_id] = True
+                for agent_name in other_agents:
                     _spawn(handle_agent_chat, agent_name, chat_id, message_id,
                            clean_text, thread_id)
+                # 如果同时@了管家，管家也回复并解除静默
+                if housekeeper_mentioned:
+                    self._housekeeper_silenced[chat_id] = False
+                    _spawn(handle_housekeeper, chat_id, message_id, clean_text, thread_id,
+                           self.thread_refs, self.thread_state, self._on_start_workflow)
                 return
 
+            if housekeeper_mentioned:
+                # 只@了管家：解除静默，管家回复
+                self._housekeeper_silenced[chat_id] = False
+                _spawn(handle_housekeeper, chat_id, message_id, clean_text, thread_id,
+                       self.thread_refs, self.thread_state, self._on_start_workflow)
+                return
+
+            if is_at_all:
+                # @所有人：所有 Agent 回复，管家也回复
+                self._housekeeper_silenced[chat_id] = False
+                from src.agents.organization import get_all_agents
+                for agent in get_all_agents():
+                    if agent.name != "housekeeper":
+                        _spawn(handle_agent_chat, agent.name, chat_id, message_id,
+                               clean_text, thread_id)
+                _spawn(handle_housekeeper, chat_id, message_id, clean_text, thread_id,
+                       self.thread_refs, self.thread_state, self._on_start_workflow)
+                return
+
+            # ── 无@提及：管家静默时不响应 ──
+            if self._housekeeper_silenced.get(chat_id, False):
+                return
+
+            # 检查是否有待恢复的工作流
             config = {"configurable": {"thread_id": thread_id}}
             try:
                 state = self.graph_app.get_state(config)
@@ -149,6 +188,7 @@ class Dispatcher:
             except Exception:
                 pass
 
+            # 默认：管家处理
             _spawn(handle_housekeeper, chat_id, message_id, clean_text, thread_id,
                    self.thread_refs, self.thread_state, self._on_start_workflow)
 
@@ -157,6 +197,16 @@ class Dispatcher:
 
     def _dispatch_command(self, text: str, chat_id: str, thread_id: str, message_id: str) -> bool:
         """尝试匹配命令，匹配成功返回 True。"""
+        if _CMD_TEST.match(text):
+            set_test_mode(True)
+            send_text(chat_id, "已切换到 TEST 模式 (最小LLM调用)")
+            return True
+
+        if _CMD_WORK.match(text):
+            set_test_mode(False)
+            send_text(chat_id, "已切换到 WORK 模式 (完整Agent能力)")
+            return True
+
         if _CMD_HELP.match(text):
             handle_help(chat_id)
             return True

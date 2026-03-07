@@ -1,9 +1,8 @@
-"""联邦制主图 — 管家路由 -> media_group / dev_group / chat
+"""联邦制主图 — 管家路由 -> media_group / dev_group
 
 入口: housekeeper_router 分析意图
   -> media: 转入影视组完整工作流
   -> dev: 转入开发组架构分析
-  -> chat: 直接结束（由 server.py 处理回复）
 """
 
 import os
@@ -25,7 +24,7 @@ from src.agents.dev_group.workflow import build_dev_graph
 
 def _route_after_housekeeper(state: GraphState) -> str:
     """根据 target_group 路由到对应子图。"""
-    target = state.get("target_group", "chat")
+    target = state.get("target_group", "dev")
     if target in ("studio", "media"):
         return "media_workflow"
     elif target == "dev":
@@ -70,7 +69,7 @@ def node_dev_workflow(state: GraphState) -> dict:
 # ── 构建主图 ─────────────────────────────────────────────────────────
 
 def build_main_graph():
-    """构建联邦制主图: housekeeper -> studio/dev/chat。"""
+    """构建联邦制主图: housekeeper -> media/dev。"""
     workflow = StateGraph(GraphState)
 
     workflow.add_node("housekeeper_router", node_housekeeper_router)

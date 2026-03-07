@@ -24,9 +24,12 @@ def handle_archive(chat_id, thread_id, folder_token, graph_app):
         send_text(chat_id, "工作流尚未产出内容，无法归档。")
         return
 
-    resolved = (folder_token or os.environ.get("FEISHU_ARCHIVE_FOLDER_TOKEN", "")).strip()
+    from src.tools.lark.docs.permissions import get_department_folder
+    resolved = (folder_token
+                or get_department_folder("media_group")
+                or os.environ.get("FEISHU_ARCHIVE_FOLDER_TOKEN", "")).strip()
     if not resolved:
-        send_as_agent("housekeeper", chat_id, "未配置归档文件夹 token，请设置 FEISHU_ARCHIVE_FOLDER_TOKEN。")
+        send_as_agent("housekeeper", chat_id, "未配置归档文件夹，请检查部门文件夹或设置 FEISHU_ARCHIVE_FOLDER_TOKEN。")
         return
 
     send_as_agent("housekeeper", chat_id, "正在归档到飞书云文档...")

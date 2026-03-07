@@ -24,6 +24,9 @@ logs/
 # Agent state
 .agent-state.json
 
+# Test files
+tests/
+
 # OS
 .DS_Store
 

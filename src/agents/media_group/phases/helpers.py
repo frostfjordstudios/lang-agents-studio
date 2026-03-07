@@ -1,7 +1,6 @@
 """Shared helpers for media group nodes."""
 
 import logging
-import os
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -14,7 +13,16 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "projects"
 
-TEST_MODE = os.environ.get("TEST_MODE", "").strip().lower() in ("1", "true", "yes")
+from src.agents.management.housekeeper.test_mode import is_test_mode as _is_test_mode
+
+
+class _TestModeProxy:
+    """Proxy that evaluates TEST_MODE at access time for runtime switching."""
+    def __bool__(self):
+        return _is_test_mode()
+
+
+TEST_MODE = _TestModeProxy()
 
 _TEST_PROMPTS = {
     "writer": "用一句话写个10字以内的剧本概念。只回一句话。",

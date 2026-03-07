@@ -21,6 +21,7 @@ from lark_oapi.api.docx.v1 import (
 )
 
 from ..client import get_client
+from .permissions import grant_access
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,9 @@ def export_state_to_docx(
 
     document_id = create_resp.data.document.document_id
     logger.info("文档已创建: document_id=%s, title=%s", document_id, title)
+
+    # 自动授权给 owner
+    grant_access(document_id, resource_type="docx")
 
     # 2. 组装内容块
     blocks = _build_content_blocks(state)

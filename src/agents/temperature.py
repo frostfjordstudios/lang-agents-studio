@@ -11,5 +11,5 @@ BALANCED    = 0.5    # 平衡：通用对话
 EXPRESSIVE  = 0.6    # 表达：声音设计（需要情感但有框架）
 CREATIVE    = 0.7    # 创意：编剧、美术设计
 IMAGINATIVE = 0.8    # 想象：头脑风暴、概念探索
-FREESTYLE   = 0.9    # 自由：管家闲聊、创意讨论
+FREESTYLE   = 0.9    # 自由：创意讨论
 UNHINGED    = 1.0    # 无拘：纯创意实验（慎用）

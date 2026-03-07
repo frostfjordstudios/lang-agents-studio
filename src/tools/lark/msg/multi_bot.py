@@ -39,6 +39,7 @@ class BotConfig:
     emoji: str
     app_id: str = ""
     app_secret: str = ""
+    open_id: str = ""  # 机器人在飞书的 open_id，用于判断是否被@
 
 
 # ── Agent -> Bot 映射配置（从 registry 自动生成）─────────────────────
@@ -56,9 +57,11 @@ def _load_bot_credentials():
         env_prefix = f"FEISHU_BOT_{agent_name.upper()}"
         app_id = os.environ.get(f"{env_prefix}_APP_ID", "")
         app_secret = os.environ.get(f"{env_prefix}_APP_SECRET", "")
+        open_id = os.environ.get(f"{env_prefix}_OPEN_ID", "")
         if app_id and app_secret:
             config.app_id = app_id
             config.app_secret = app_secret
+            config.open_id = open_id
             loaded.append(agent_name)
         else:
             logger.debug("No credentials for %s (env: %s_APP_ID)", agent_name, env_prefix)
@@ -69,8 +72,82 @@ def _load_bot_credentials():
         logger.info("Single-bot mode: no independent bot credentials found")
 
 
+# 主机器人（管家）的 open_id
+_main_bot_open_id = os.environ.get("FEISHU_OPEN_ID", "").strip()
+
 # 模块加载时尝试读取
 _load_bot_credentials()
+
+
+def _fetch_bot_open_id(app_id: str, app_secret: str) -> str:
+    """通过 /open-apis/bot/v3/info 获取机器人 open_id（直接 HTTP 请求）。"""
+    import urllib.request
+    import urllib.error
+
+    # 1. 获取 tenant_access_token
+    try:
+        token_url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        token_data = json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
+        token_req = urllib.request.Request(token_url, data=token_data,
+                                           headers={"Content-Type": "application/json; charset=utf-8"})
+        with urllib.request.urlopen(token_req, timeout=10) as resp:
+            token_resp = json.loads(resp.read())
+        if token_resp.get("code") != 0:
+            logger.debug("get token failed for %s: %s", app_id[:8], token_resp.get("msg"))
+            return ""
+        token = token_resp["tenant_access_token"]
+    except Exception as e:
+        logger.debug("get token error for %s: %s", app_id[:8], e)
+        return ""
+
+    # 2. 调用 bot info
+    try:
+        info_url = "https://open.feishu.cn/open-apis/bot/v3/info"
+        info_req = urllib.request.Request(info_url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(info_req, timeout=10) as resp:
+            info_resp = json.loads(resp.read())
+        if info_resp.get("code") == 0 and info_resp.get("bot"):
+            return info_resp["bot"].get("open_id", "")
+    except Exception as e:
+        logger.debug("get bot info error for %s: %s", app_id[:8], e)
+    return ""
+
+
+def fetch_all_bot_open_ids():
+    """启动时调用：为所有缺少 open_id 的机器人自动通过 API 获取。"""
+    global _main_bot_open_id
+
+    # 主机器人
+    if not _main_bot_open_id:
+        main_id = os.environ.get("FEISHU_APP_ID", "")
+        main_secret = os.environ.get("FEISHU_APP_SECRET", "")
+        if main_id and main_secret:
+            oid = _fetch_bot_open_id(main_id, main_secret)
+            if oid:
+                _main_bot_open_id = oid
+                logger.info("housekeeper open_id (api): %s", oid)
+
+    # 各独立机器人
+    fetched = []
+    for name, config in AGENT_BOTS.items():
+        if config.open_id or not config.app_id or not config.app_secret:
+            continue
+        oid = _fetch_bot_open_id(config.app_id, config.app_secret)
+        if oid:
+            config.open_id = oid
+            fetched.append(f"{name}={oid}")
+
+    if fetched:
+        logger.info("Auto-fetched open_ids: %s", ", ".join(fetched))
+
+    # 输出所有 bot open_id 汇总
+    logger.info("=" * 50)
+    logger.info("[Bot Open ID 汇总]")
+    logger.info("  housekeeper: %s", _main_bot_open_id or "(未获取)")
+    for name, config in AGENT_BOTS.items():
+        if config.app_id:
+            logger.info("  %s: %s", name, config.open_id or "(未获取)")
+    logger.info("=" * 50)
 
 
 # ── Bot Client 缓存 ─────────────────────────────────────────────────
@@ -105,6 +182,27 @@ def get_agent_prefix(agent_name: str) -> str:
     from src.agents.organization import get_display_name
     dn = get_display_name(agent_name)
     return f"{dn} | " if dn != agent_name else ""
+
+
+def get_all_bot_open_ids() -> dict[str, str]:
+    """返回 {open_id: agent_name} 映射，包含主机器人和所有独立机器人。"""
+    mapping = {}
+    if _main_bot_open_id:
+        mapping[_main_bot_open_id] = "housekeeper"
+    for name, config in AGENT_BOTS.items():
+        if config.open_id:
+            mapping[config.open_id] = name
+    return mapping
+
+
+def get_bot_name_by_open_id(open_id: str) -> str:
+    """根据 open_id 查找对应的 agent name，找不到返回空字符串。"""
+    if open_id == _main_bot_open_id:
+        return "housekeeper"
+    for name, config in AGENT_BOTS.items():
+        if config.open_id == open_id:
+            return name
+    return ""
 
 
 def is_multi_bot_enabled(agent_name: str) -> bool:

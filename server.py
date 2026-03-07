@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 # ── 初始化 ────────────────────────────────────────────────────────────
 
 preload_all()
+
+from src.tools.lark.msg.multi_bot import fetch_all_bot_open_ids
+fetch_all_bot_open_ids()
+
+from src.tools.lark.docs.permissions import ensure_department_folders
+ensure_department_folders()
+
 graph_app = build_graph()
 logger.info("LangGraph workflow compiled and ready.")
 

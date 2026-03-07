@@ -3,8 +3,7 @@
 职责：
   - handle_image_message: 下载图片并存入参考素材或效果图队列
   - handle_file_message: 下载文件，按类型提取文本或存图
-  - parse_mentions: 解析飞书 @mention
-  - MENTION_NAME_MAP: Agent 显示名 → 内部名映射
+  - parse_mentions: 解析飞书 @mention（基于 open_id 精确匹配）
 """
 
 import os
@@ -15,29 +14,26 @@ from src.tools.lark.msg.messaging import (
     download_message_file,
     image_bytes_to_base64,
 )
+from src.tools.lark.msg.multi_bot import get_bot_name_by_open_id
 from src.tools.lark.commands.read_folder import ensure_thread_refs
 from src.tools.lark.docs.doc_extract import extract_text, get_supported_extensions
 
 logger = logging.getLogger(__name__)
 
 
-# Agent 显示名→内部名映射
-MENTION_NAME_MAP: dict[str, str] = {
-    "总管": "showrunner", "showrunner": "showrunner", "制片": "showrunner", "制片人": "showrunner",
-    "管家": "housekeeper", "housekeeper": "housekeeper",
-    "编剧": "writer", "writer": "writer",
-    "导演": "director", "director": "director",
-    "美术": "art_design", "art_design": "art_design", "美术设计": "art_design",
-    "声音": "voice_design", "voice_design": "voice_design", "声音设计": "voice_design",
-    "分镜": "storyboard", "storyboard": "storyboard", "分镜师": "storyboard",
-    "架构师": "architect", "architect": "architect",
-}
-
-
 def parse_mentions(message) -> tuple[list[str], bool]:
-    """解析消息中的 @mention，返回 (被@的agent列表, 是否@了所有人)。"""
+    """解析消息中的 @mention，基于 open_id 精确匹配机器人。
+
+    Returns:
+        (被@的 agent name 列表, 是否@了所有人)
+    """
     mentioned_agents: list[str] = []
     is_at_all = False
+
+    # 检测 @_all（文本中的 @所有人）
+    content = getattr(message, "content", "")
+    if content and "@_all" in content:
+        is_at_all = True
 
     mentions = getattr(message, "mentions", None)
     if not mentions:
@@ -46,11 +42,11 @@ def parse_mentions(message) -> tuple[list[str], bool]:
     raw_mentions = getattr(mentions, "items", mentions)
     for mention in raw_mentions:
         if isinstance(mention, dict):
-            name = mention.get("name", "").lower().strip()
+            name = mention.get("name", "").strip()
             m_id = mention.get("id", {})
             open_id = m_id.get("open_id", "") if isinstance(m_id, dict) else ""
         else:
-            name = getattr(mention, "name", "").lower().strip()
+            name = getattr(mention, "name", "").strip()
             m_id = getattr(mention, "id", None)
             open_id = getattr(m_id, "open_id", "") if m_id else ""
 
@@ -58,9 +54,14 @@ def parse_mentions(message) -> tuple[list[str], bool]:
             is_at_all = True
             continue
 
-        agent = MENTION_NAME_MAP.get(name)
-        if agent:
-            mentioned_agents.append(agent)
+        # 通过 open_id 精确查找对应的 agent
+        if open_id:
+            agent = get_bot_name_by_open_id(open_id)
+            if agent:
+                mentioned_agents.append(agent)
+                continue
+
+        logger.debug("Unknown mention: name=%s open_id=%s", name, open_id)
 
     return mentioned_agents, is_at_all
 
