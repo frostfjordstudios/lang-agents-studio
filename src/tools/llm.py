@@ -25,6 +25,16 @@ def get_llm(temperature: float = 0.5) -> ChatGoogleGenerativeAI:
     )
 
 
+def sanitize_input(text: str) -> str:
+    """清理传入 LLM 的用户文本，去除可能混入的非文本内容。"""
+    if not isinstance(text, str):
+        text = str(text)
+    # 去除零宽字符
+    text = text.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    # 只保留可见文本，去除首尾空白
+    return text.strip()
+
+
 def extract_text(content) -> str:
     """从 LLM response.content 中提取纯文本（Gemini 有时返回 list[dict]）。"""
     if isinstance(content, str):

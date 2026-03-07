@@ -4,6 +4,7 @@
 内置心跳和自动重连机制，避免共享 event loop 导致的连接问题。
 """
 
+import asyncio
 import logging
 import threading
 
@@ -15,7 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 def _run_bot(app_id: str, app_secret: str, bot_name: str, event_handler):
-    """单个 bot 的 WebSocket 运行循环。"""
+    """单个 bot 的 WebSocket 运行循环。
+
+    为每个线程创建独立的 event loop，避免与主线程（uvicorn）的 loop 冲突。
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     cli = lark.ws.Client(
         app_id, app_secret,
         event_handler=event_handler,

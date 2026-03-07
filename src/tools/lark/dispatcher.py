@@ -32,6 +32,7 @@ from src.tools.lark.msg.msg_handlers import (
     parse_mentions,
 )
 from src.tools.lark.msg.text_utils import clean_text_content
+from src.tools.llm import sanitize_input
 from src.agents.management.housekeeper.chat import handle_housekeeper
 from src.agents.management.chat import handle_agent_chat
 from src.workflow.runner import run_workflow, resume_workflow
@@ -124,7 +125,7 @@ class Dispatcher:
                 return
 
             text = content.get("text", "").strip()
-            clean_text = clean_text_content(text)
+            clean_text = sanitize_input(clean_text_content(text))
             if not clean_text and not is_at_all:
                 return
 

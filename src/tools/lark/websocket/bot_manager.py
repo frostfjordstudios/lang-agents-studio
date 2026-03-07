@@ -6,7 +6,13 @@ from src.tools.lark.msg.multi_bot import AGENT_BOTS
 
 
 def collect_bot_configs() -> list[tuple[str, str, str]]:
-    """收集所有有凭证的机器人配置，返回 [(app_id, app_secret, name), ...]。"""
+    """收集所有有凭证的机器人配置，返回 [(app_id, app_secret, name), ...]。
+
+    设置环境变量 DISABLE_BOTS=true 可禁用所有机器人连接。
+    """
+    if os.environ.get("DISABLE_BOTS", "").strip().lower() in ("1", "true", "yes"):
+        return []
+
     bots = []
     main_id = os.environ.get("FEISHU_APP_ID", "")
     main_secret = os.environ.get("FEISHU_APP_SECRET", "")
