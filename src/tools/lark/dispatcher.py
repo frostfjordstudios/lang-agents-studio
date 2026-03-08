@@ -105,7 +105,10 @@ class Dispatcher:
             chat_id = message.chat_id
             message_id = message.message_id
 
+            logger.info("[RECV] type=%s chat=%s msg_id=%s", msg_type, chat_id, message_id)
+
             if self._dedup(message_id):
+                logger.debug("[DEDUP] skipping %s", message_id)
                 return
 
             thread_id = chat_id or str(uuid.uuid4())

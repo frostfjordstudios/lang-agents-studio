@@ -55,6 +55,9 @@ start_websocket(dispatcher)
 app = FastAPI(title="Feishu LangGraph Agent")
 
 
+@app.get("/")
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    import threading
+    ws_alive = any(t.name == "ws-housekeeper" and t.is_alive() for t in threading.enumerate())
+    return {"status": "ok", "websocket": "connected" if ws_alive else "dead"}
