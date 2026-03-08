@@ -19,7 +19,7 @@ from src.tools.lark.websocket.connection import start_websocket
 _log_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
 
 _console = logging.StreamHandler()
-_console.setLevel(logging.WARNING)
+_console.setLevel(logging.INFO)
 _console.setFormatter(_log_fmt)
 
 _log_dir = Path(__file__).resolve().parent / "logs"
