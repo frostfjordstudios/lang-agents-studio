@@ -31,7 +31,7 @@ def _run_bot(app_id: str, app_secret: str, bot_name: str, dispatcher):
     cli = ws_mod.Client(
         app_id, app_secret,
         event_handler=event_handler,
-        log_level=lark.LogLevel.INFO,
+        log_level=lark.LogLevel.DEBUG,
     )
     logger.info("Starting bot [%s] WebSocket...", bot_name)
     try:

@@ -105,6 +105,7 @@ class Dispatcher:
             chat_id = message.chat_id
             message_id = message.message_id
 
+            print(f"[RECV] type={msg_type} chat={chat_id} msg_id={message_id}", flush=True)
             logger.info("[RECV] type=%s chat=%s msg_id=%s", msg_type, chat_id, message_id)
 
             if self._dedup(message_id):
