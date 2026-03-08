@@ -1,33 +1,27 @@
 """飞书 WebSocket 长连接启动
 
-管家 bot 在独立线程中运行。
-在线程中先设置新的 event loop，再 import lark SDK 构建 Client，
-确保 SDK 的模块级 loop 变量绑定到线程自己的 loop。
+管家 bot 在独立线程中运行 WebSocket。
 """
 
 import asyncio
 import logging
 import os
-import sys
 import threading
 
 logger = logging.getLogger(__name__)
 
 
 def _run_bot(app_id: str, app_secret: str, bot_name: str, dispatcher):
-    """管家 bot 的 WebSocket 运行循环。"""
-    # 1. 创建并设置线程独立的 event loop
+    """管家 bot 的 WebSocket 运行循环 — 在全新的 event loop 上运行。"""
+    import lark_oapi as lark
+
+    # 在 import lark 之后，覆盖 SDK 的模块级 loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # 2. 强制 lark SDK ws 模块重新初始化，绑定到当前线程的 loop
-    import importlib
     import lark_oapi.ws.client as ws_mod
-    importlib.reload(ws_mod)
+    ws_mod.loop = loop
 
-    import lark_oapi as lark
-
-    # 3. 用 reload 后的模块创建 Client
     event_handler = (
         lark.EventDispatcherHandler.builder("", "")
         .register_p2_im_message_receive_v1(dispatcher.handle)
@@ -42,10 +36,10 @@ def _run_bot(app_id: str, app_secret: str, bot_name: str, dispatcher):
     logger.info("Starting bot [%s] WebSocket...", bot_name)
     try:
         cli.start()
+    except KeyboardInterrupt:
+        pass
     except Exception as e:
         logger.error("Bot [%s] WebSocket exited: %s", bot_name, e, exc_info=True)
-    finally:
-        loop.close()
 
 
 def start_websocket(dispatcher) -> None:

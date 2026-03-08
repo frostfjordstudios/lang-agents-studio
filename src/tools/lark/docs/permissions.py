@@ -198,7 +198,7 @@ def ensure_department_folders(app_id: str = "", app_secret: str = "") -> dict[st
 
     root = _get_root_folder(access_token)
     if not root:
-        logger.error("获取根目录失败")
+        logger.warning("获取根目录失败（机器人可能缺少 drive:drive 权限），跳过文件夹初始化")
         return {}
 
     # 创建 departments 根

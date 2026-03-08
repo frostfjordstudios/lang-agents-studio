@@ -38,8 +38,11 @@ preload_all()
 from src.tools.lark.msg.multi_bot import fetch_all_bot_open_ids
 fetch_all_bot_open_ids()
 
-from src.tools.lark.docs.permissions import ensure_department_folders
-ensure_department_folders()
+try:
+    from src.tools.lark.docs.permissions import ensure_department_folders
+    ensure_department_folders()
+except Exception as e:
+    logger.warning("部门文件夹初始化跳过: %s", e)
 
 graph_app = build_graph()
 logger.info("LangGraph workflow compiled and ready.")
